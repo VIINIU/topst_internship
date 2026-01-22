@@ -118,6 +118,8 @@ class ObjectAnalytics:
 # 주행 관련 전역 변수
 # =========================================================
 
+sndfile = open("/dev/tcc_ipc_micom", 'wb')
+
 MAX_SPEED = 100        # 최대 속도
 SPEED_INCREMENT = 10     # F 누를 때마다 증가량
 SPEED_DECREMENT = 10     # B 누를 때마다 감소량
@@ -491,7 +493,7 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping...")
+        print("\nStopping...")-
     finally:
         global _stop
         _stop = True
