@@ -1,5 +1,4 @@
-#!/usr/bin/python3
-# -*- coding: utf-8 -*-
+
 import json, time, socket, threading, http.client
 import serial
 from urllib.parse import urlparse
