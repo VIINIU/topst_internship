@@ -2,6 +2,7 @@
 import json, time, socket, threading, http.client
 import serial
 from urllib.parse import urlparse
+from typing import Any, Dict
 import argparse
 from Library.IPC_Library import IPC_SendPacketWithIPCHeader, IPC_ReceivePacketFromIPCHeader
 from Library.IPC_Library import TCC_IPC_CMD_CA72_EDUCATION_CAN_DEMO, IPC_IPC_CMD_CA72_EDUCATION_CAN_DEMO_START
@@ -25,31 +26,114 @@ class VCP_IO:
     SUB_LEFT = 0x01
     SUB_RIGHT = 0x02
 
-sndfile = open("/dev/tcc_ipc_micom", 'wb')
-HOST,PORT= "0.0.0.0", 9999          
-SEND_HZ  = 30                     
-POLL_HZ  = 60   
-CAN_HZ = 60       
-IDLE_RPM = 552
-BLINK_INTERVAL = 0.5  # 깜빡이 간격 (0.5초)
+# =========================================================
+# 🔽 [유빈] AI-G 수신 및 판단용 전역 변수 선언, 클래스, 함수 선언 🔽 
+# =========================================================
+AI_G_IP = "192.168.0.101"
+AI_PORT = 9999
 
-# 🚗 속도 증가 설정
+img_width = 800
+img_height = 480
+
+# 구역별 상태 저장 (L, F, R)
+_zone_state = {
+    "L": (False, False),
+    "F": (False, False),
+    "R": (False, False)
+}
+
+# [Class] 구역 상태 및 분석 클래스
+class ClearCheck:
+    def __init__(self):
+        self.has_obstacle = False
+        self.is_close = False
+        self.last_update_time = 0.0
+
+class ObjectAnalytics:
+    def __init__(self, width=img_width, height=img_height):
+        self.w = width
+        self.h = height
+        self.total_area = width * height
+        self.close_area_ratio = 0.15
+        self.timeout = 0.5
+        self.zones = {'L': ClearCheck(), 'F': ClearCheck(), 'R': ClearCheck()}
+
+    def update_status(self, json_data: dict):
+        """
+        C코드(NnAppMain.c)에서 보내주는 단일 객체 포맷을 처리
+        Format: {"cls":1, "xmin":..., "ymin":..., "xmax":..., "ymax":..., "first":...}
+        """
+        current_time = time.time()
+
+        # 데이터 유효성 검사 (xmin 키가 있는지 확인)
+        if json_data and 'xmin' in json_data:
+            xmin = json_data.get('xmin', 0)
+            xmax = json_data.get('xmax', 0)
+            ymin = json_data.get('ymin', 0)
+            ymax = json_data.get('ymax', 0)
+            
+            # 크기 및 중앙값 계산
+            obj_w = xmax - xmin
+            obj_h = ymax - ymin
+            obj_area = obj_w * obj_h
+            center_x = xmin + (obj_w / 2.0)
+
+            # 화면 3분할 기준선
+            div_1 = self.w / 3.0
+            div_2 = self.w * (2.0 / 3.0)
+
+            # 구역 판단 (L/F/R)
+            target_zone = ''
+            if center_x < div_1: target_zone = 'L'
+            elif center_x > div_2: target_zone = 'R'
+            else: target_zone = 'F'
+
+            # 해당 구역 상태 업데이트
+            self.zones[target_zone].has_obstacle = True
+            
+            # 가까움 여부 판단 (전체 화면의 15% 이상)
+            if (obj_area / self.total_area) > self.close_area_ratio:
+                self.zones[target_zone].is_close = True
+            
+            # 마지막 업데이트 시간 갱신 (Timeout 방지)
+            self.zones[target_zone].last_update_time = current_time
+
+        # 타임아웃 처리 (0.5초 동안 업데이트 없는 구역은 Clear 처리)
+        for key in self.zones:
+            if current_time - self.zones[key].last_update_time > self.timeout:
+                self.zones[key].has_obstacle = False
+                self.zones[key].is_close = False
+
+        return (
+            (self.zones['L'].has_obstacle, self.zones['L'].is_close),
+            (self.zones['F'].has_obstacle, self.zones['F'].is_close),
+            (self.zones['R'].has_obstacle, self.zones['R'].is_close)
+        )
+
+
+# =========================================================
+# 🔼 [유빈] AI-G 수신 및 판단용 전역 변수 선언, 클래스, 함수 선언 끝 🔼
+# =========================================================
+# =========================================================
+# 주행 관련 전역 변수
+# =========================================================
+
 MAX_SPEED = 100        # 최대 속도
 SPEED_INCREMENT = 10     # F 누를 때마다 증가량
 SPEED_DECREMENT = 10     # B 누를 때마다 감소량
 ACCEL_INTERVAL = 0.5    # 가속 업데이트 주기 (초)
-
 
 QT_MAX_SPEED = 100        # 최대 속도
 QT_SPEED_INCREMENT = 1     # F 누를 때마다 증가량
 QT_SPEED_DECREMENT = 1     # B 누를 때마다 감소량
 QT_ACCEL_INTERVAL = 5   # 가속 업데이트 주기 (초)
 
-
 STEER_CENTER = 65
 STEER_MIN = 0
 STEER_MAX = 127       
 STEER_STEP = 10
+
+BLINK_INTERVAL = 0.5  # 깜빡이 간격 (0.5초)
 
 TASK_HZ = {
     "break":     10,  
@@ -79,6 +163,10 @@ _can = {"park": False,
 _lock   = threading.Lock()
 _stop   = False
  
+# =========================================================
+# 주행 관련 함수
+# =========================================================
+
 def send_ipc_signal(io_type, action_or_value, subtype=None):
     """IPC 신호 전송 통합 함수"""
     try:
@@ -104,7 +192,6 @@ def wheel_action(cur):
     wheel = int((cur + 127) * (255 / 254))  # 0~255 매핑
     send_ipc_signal(VCP_IO.WHEEL, wheel)
 
-# 🚗 속도 증가/감소 처리 스레드
 def speed_controller():
     """F를 누르고 있으면 속도 증가, B를 누르고 있으면 속도 감소"""
     while not _stop:
@@ -187,6 +274,10 @@ def emergency_worker():
 
         time.sleep(0.5)  # 너무 자주 돌 필요는 없음
 
+
+# =========================================================
+# BT_제어_함수
+# =========================================================
 
 def handle_bt_command(ch):
     with _lock:
@@ -309,80 +400,76 @@ def bt_car():
         ser.close()
         print("UART Closed")
 
-def serve():
-    global _stop
-    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind((HOST, PORT))
-    srv.listen(1)
-    print(f"[NET] listening on {HOST}:{PORT}")
+# =========================================================
+# [Class] 구역 상태 및 분석 클래스
+# =========================================================
 
-    # Qt 표시용 속도 (독립적으로 동작)
-    qt_speed = 0.0     # 시각적 speed
-    qt_rpm = float(IDLE_RPM)
-    qt_max = QT_MAX_SPEED
+# =========================================================
+# [Thread] AI 데이터 수신 워커
+# =========================================================
+def ai_data_worker():
+    analyzer = ObjectAnalytics()
+    print(f"[AI] Worker Started. Target: {AI_G_IP}:{AI_PORT}")
 
     while not _stop:
-        conn, addr = srv.accept()
-        print(f"[NET] client connected: {addr[0]}:{addr[1]}")
+        sock = None
         try:
-            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            period = 1.0 / SEND_HZ
-            next_t = time.monotonic()
-            encoder = json.dumps
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(3.0)
+            print(f"[AI] Connecting...")
+            sock.connect((AI_G_IP, AI_PORT))
+            print(f"[AI] Connected! Waiting for data...")
+            
+            f = sock.makefile("r", encoding="utf-8", newline="\n")
+            sock.settimeout(None) 
 
-            while True:
-                # CAN 상태 읽기
-                with _lock:
-                    is_accel = _can["is_accelerating"]
-                    is_reverse = _can["is_resverse"]
+            while not _stop:
+                line = f.readline()
+                if not line:
+                    print("[AI] Server Disconnected.")
+                    break
+                
+                # 1. [모니터링] 들어온 Raw Data 바로 출력
+                raw_str = line.strip()
+                if not raw_str: continue
+                print(f"[RAW] {raw_str}")
 
-                # ■■■ Qt speed 증가 로직 ■■■
-                if is_accel:
-                    if not is_reverse:   # 전진
-                        qt_speed = min(qt_speed + QT_SPEED_INCREMENT, qt_max)
-                    else:                # 후진
-                        qt_speed = max(qt_speed - QT_SPEED_INCREMENT, -qt_max)
-                else:
-                    # 자연감속 (좀 더 부드럽게 표현)
-                    if qt_speed > 0:
-                        qt_speed = max(0, qt_speed - QT_SPEED_DECREMENT)
-                    elif qt_speed < 0:
-                        qt_speed = min(0, qt_speed + QT_SPEED_DECREMENT)
+                try:
+                    # 2. JSON 파싱
+                    data = json.loads(raw_str)
+                    
+                    # 3. 상태 업데이트 (Clear 여부 판단)
+                    res_L, res_F, res_R = analyzer.update_status(data)
+                    
+                    # 4. 전역 변수 공유
+                    with _lock:
+                        _zone_state["L"] = res_L
+                        _zone_state["F"] = res_F
+                        _zone_state["R"] = res_R
+                    
+                    # (선택) 분석된 Zone 상태 출력 - 너무 빠르면 주석 처리
+                    # print(f"[Zone] L:{res_L} F:{res_F} R:{res_R}")
 
-                # rpm은 Qt용 속도 기반으로 계산
-                qt_rpm = float(IDLE_RPM + abs(qt_speed) * 40)
-
-                # ■■■ _latest 업데이트 ■■■
-                with _lock:
-                    _latest["speed_kmh"] = float(qt_speed)
-                    _latest["rpm"] = float(qt_rpm)
-
-                # JSON 전송
-                payload = dict(_latest)
-                line = encoder(payload, separators=(",",":")) + "\n"
-                conn.sendall(line.encode("utf-8"))
-
-                # 타이밍 조절
-                next_t += period
-                now = time.monotonic()
-                if next_t > now:
-                    time.sleep(next_t - now)
-                else:
-                    next_t = now
-
-        except (BrokenPipeError, ConnectionResetError, OSError):
-            pass
+                except json.JSONDecodeError:
+                    print(f"[AI] JSON Error: {raw_str}")
+        
+        except Exception as e:
+            print(f"[AI] Connection Error: {e}")
+            time.sleep(2)
         finally:
-            try:
-                conn.close()
-            except:
-                pass
+            if sock: 
+                try: sock.close()
+                except: pass
 
 
 
 def main():
-    print("Starting ETS2 Telemetry Monitor...")
+    global _stop
+    print("Starting System...")
+
+    # AI 수신 스레드 시작
+    t_ai = threading.Thread(target=ai_data_worker, daemon=True, name="AI_Worker")
+    t_ai.start()
     
     # 블루투스 송신 스레드
     t = threading.Thread(target=bt_car, daemon=True)
@@ -400,9 +487,6 @@ def main():
     t_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
     t_wheel.start()
 
-    # qt 쓰레드
-    t_serve = threading.Thread(target=serve, daemon=True, name="qt_controller")
-    t_serve.start()
     try:
         while True:
             time.sleep(1)
@@ -411,13 +495,14 @@ def main():
     finally:
         global _stop
         _stop = True
+
         t.join(timeout=1.0)
+        t_ai.join(timeout=1.0)
         t_speed.join(timeout=1.0)
         t_emer.join(timeout =1.0)
         t_wheel.join(timeout=1.0)
-        t_serve.join(timeout=1.0)
+
         print("Shutdown complete.")
-        sndfile.close()
- 
+        if sndfile: sndfile.close() 
 if __name__ == "__main__":
     main()
