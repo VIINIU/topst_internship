@@ -204,8 +204,7 @@ def speed_controller():
             is_brake = _can.get("is_braking",False)
             steer = _can.get("steer", STEER_CENTER)
         
-        if steer < 70 and steer > 60: # 오버스티어, 전복 방지
-            is_resverse = True
+        if steer < 80 and steer > 50: # 오버스티어, 전복 방지
             is_brake = True
 
         if is_accel and not is_brake:
@@ -214,16 +213,11 @@ def speed_controller():
                 new_speed = min(current_speed + SPEED_INCREMENT, MAX_SPEED)
                 with _lock:
                     _can["speed_kmh"] = new_speed
-                send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
-                print(f"[ACCEL] Speed: {new_speed}")
 
             else:
                 new_speed = min(current_speed - SPEED_INCREMENT, MAX_SPEED)
                 with _lock:
                     _can["speed_kmh"] = new_speed
-                send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
-                
-                print(f"[ACCEL] Speed: {new_speed}")
 
         else if is_brake:
             # 감속
@@ -231,13 +225,13 @@ def speed_controller():
                 new_speed = max(current_speed - SPEED_DECREMENT, 0) # 후진 방지
             
             else : # 후진 상황
-                new_speed = max(current_speed + SPEED_DECREMENT, 0)
-            
+                new_speed = min(current_speed + SPEED_DECREMENT, 0)
+
             with _lock:
                 _can["speed_kmh"] = new_speed
-            send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
-        
 
+        send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
+        print(f"[ACCEL] Speed: {new_speed}")
         time.sleep(ACCEL_INTERVAL)
 
 
