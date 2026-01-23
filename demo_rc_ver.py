@@ -165,7 +165,9 @@ _can = {"park": False,
         "is_resverse": False,
         "is_steering": False,
         "is_steer_reverse": False,
-        "avoid_mode": False} #[소연] 장애물 회피 플래그  
+        "avoid_mode": False
+        "target_steer" : 65
+        } #[소연] 장애물 회피 플래그  
 
 _lock   = threading.Lock()
 _stop   = False
@@ -248,8 +250,22 @@ def wheel_controller():
             is_steering = _can.get("is_steering", False)
             is_steer_reverse = _can.get("is_steer_reverse", False)
             steer = _can.get("steer", STEER_CENTER)
+            is_emergency = _can.get("avoid_mode", False)
+            target_steer = _can.get("target_steer", False)
 
-        if is_steering:
+        if is_emergency:
+            if target_steer = 1:
+                if is_steer_reverse:
+                    new_steer = min((STEER_MAX + STEER_CENTER)/2, steer + STEER_STEP*2)
+                else:
+                    new_steer = max((STEER_MIN + STEER_CENTER)/2, steer - STEER_STEP*2)
+            else
+                if is_steer_reverse:
+                    new_steer = min(STEER_MAX, steer + STEER_STEP*2)
+                else:
+                    new_steer = max(STEER_MIN, steer - STEER_STEP*2)
+        
+        elif is_steering:
             # 왼쪽 (reverse=True) / 오른쪽 (reverse=False)
             if is_steer_reverse:
                 new_steer = min(STEER_MAX, steer + STEER_STEP)
@@ -283,6 +299,10 @@ def emergency_worker():
 
         # 1순위: 비상등 (둘 다 깜빡임)
         if emer:
+            # BLINK_INTERVAL 기반으로 ON/OFF 결정
+            on = get_blink_state()
+            action = VCP_IO.ACTION_ON if on else VCP_IO.ACTION_OFF
+            # 좌우 모두 같은 상태로 깜빡이기
             send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_LEFT)
             send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_RIGHT)
 
@@ -298,6 +318,7 @@ def emergency_worker():
 
         # 4순위: 모두 꺼짐
         else:
+            # 비상등이 꺼진 상태인데, 혹시 켜져있으면 한 번만 OFF 보내기
             send_ipc_signal(VCP_IO.TURN_SIGNAL, VCP_IO.ACTION_OFF, VCP_IO.SUB_LEFT)
             send_ipc_signal(VCP_IO.TURN_SIGNAL, VCP_IO.ACTION_OFF, VCP_IO.SUB_RIGHT)
 
@@ -316,8 +337,8 @@ def emergency_control_logic():
     """
     print("[Emergency Logic] Priority-Based Algorithm Started.")
 
-    TIME_SHORT = 0.8
-    TIME_LONG = 1.5
+    DEG_S = 1
+    DEG_L = 2
 
     while not _stop:
         with _lock:
@@ -326,7 +347,7 @@ def emergency_control_logic():
             r_has, r_close = _zone_state["R"]
 
         # 로컬 제어 변수
-        steer_time = 0.0
+        degree = 0
         steer_dir = False
         do_steering = False
         do_emergency_stop = False
@@ -347,15 +368,13 @@ def emergency_control_logic():
         
         elif f_close or l_close or r_close: # 3순위: 장애물이 가깝거나 정면이 근접한 경우 (긴 조향)
             do_steering = True
-            steer_time = TIME_LONG
-            # 회피 방향 결정: 왼쪽이 비어있으면 왼쪽(True), 아니면 오른쪽(False)
+            degree = DEG_L
             steer_dir = True if not l_has else False
             print(f"[PRIORITY 3] CLOSE OBSTACLE! Steering {'Left' if steer_dir else 'Right'} (Long)")
 
         elif f_has: # 4순위: 장애물이 멀리 있는 경우 (짧은 조향)
             do_steering = True
-            steer_time = TIME_SHORT
-            # 회피 방향 결정
+            degree = DEG_S
             steer_dir = True if not l_has else False
             print(f"[PRIORITY 4] Obstacle Ahead (Far). Steering {'Left' if steer_dir else 'Right'} (Short)")
 
@@ -391,8 +410,7 @@ def emergency_control_logic():
             
             # 2. steer_time 동안 'wheel_controller'가 동작하도록 대기
             # 이 시간 동안 wheel_controller 스레드가 50ms마다 steer 값을 ±10씩 바꿉니다.
-            time.sleep(steer_time) 
-            
+
             # 3. 조향 종료
             with _lock:
                 _can["is_steering"] = False
@@ -400,7 +418,7 @@ def emergency_control_logic():
                 _can["right_blinker"] = False
             print(f"[Logic] Steering Action Finished.")
         
-        else: # 장애물 없을 때 -> lane detection
+        else:
             with _lock:
                 _can["avoid_mode"] = False
                 _can["emergency"] = False
@@ -411,135 +429,6 @@ def emergency_control_logic():
         time.sleep(0.1)
 # =========================================================
 # 🔼 [소연] 장애물 회피 관련 코드 끝 🔼
-# =========================================================
-
-# =========================================================
-# BT_제어_함수
-# =========================================================
-
-def handle_bt_command(ch):
-    with _lock:
-        if ch == "F":        #전진 시작 (가속 플래그 ON)
-            _can["is_accelerating"] = True
-            _can["is_resverse"] = False
-            _can["is_braking"] = False
-            print("[BT] Forward START (Accelerating)")
-
-        elif ch == "B":      #후진/감속 시작
-            _can["is_accelerating"] = True
-            _can["is_resverse"] = True
-            _can["is_braking"] = False
-            print("[BT] Brake START (Decelerating)")
-
-        elif ch == "L":      # 좌회전
-            _can["is_steering"] =True
-            _can["is_steer_reverse"] =True
-
-        elif ch == "R":      # 우회전
-            _can["is_steering"] = True
-            _can["is_steer_reverse"] =False
-
-        elif ch == "u":      # 헤드라이트 OFF
-            send_ipc_signal(VCP_IO.HEAD_LIGHT, 0x02)
-            print("[BT] headlights OFF")
-
-        elif ch == "X":      # 비상등
-            _can["emergency"] = True
-            print("[BT] Emergency ON")
-
-        elif ch == "x":
-            _can["emergency"] = False
-            print("[BT] Emergency OFF")
-
-        elif ch == "w":      # 브레이크등 OFF
-            _can["is_braking"] = False
-            send_ipc_signal(VCP_IO.BREAK_LIGHT, 0x02)
-            print("[BT] break OFF")
-
-        elif ch == "W":      # 브레이크등 ON
-            _can["is_braking"] = True
-            send_ipc_signal(VCP_IO.BREAK_LIGHT, 0x01)
-            print("[BT] break ON")
-
-        elif ch == "U":      # 헤드라이트 ON
-            send_ipc_signal(VCP_IO.HEAD_LIGHT, 0x01)
-            print(f"[BT] Headlight ON")
-
-
-        elif ch == "G":  
-            _can["is_accelerating"] = True
-            _can["is_resverse"] = False
-            _can["is_steering"] = True
-            _can["is_steer_reverse"] =True
-            _can["is_braking"] = False
-
-        elif ch == "H":
-            _can["is_accelerating"] = True
-            _can["is_resverse"] = False
-            _can["is_steering"] = True
-            _can["is_steer_reverse"] =False
-            _can["is_braking"] = False
-            
-
-        # ----- 후진 + 회전 -----
-        elif ch == "I":
-            _can["is_accelerating"] = True
-            _can["is_resverse"] = True
-            _can["is_steering"] = True
-            _can["is_steer_reverse"] =True
-            _can["is_braking"] = False
-        elif ch == "J":
-            _can["is_accelerating"] = True
-            _can["is_resverse"] = True
-            _can["is_steering"] = True
-            _can["is_steer_reverse"] =False
-            _can["is_braking"] = False
-
-        elif ch == "S":
-            _can["is_accelerating"] = False
-            _can["is_braking"] = True
-            _can["speed_kmh"] = 0
-            _can["is_steering"] = False
-            _can["steer"] = 65
-            
-        else:
-            print(f"[BT] Unknown key: {ch}")
-         
-def bt_car():
-    try:
-        ser = serial.Serial(
-            port="/dev/ttyAMA1",
-            baudrate=9600,
-            timeout=0.1
-        )
-    except Exception as e:
-        print(f"uart open fail: {e}")
-        return
-
-    print("✓ UART Opened (/dev/ttyAMA1 @ 9600)")
-    print("Waiting for data...\n")
-
-    try:
-        while True:
-            data = ser.read(1)
-            if data:
-                ch = data.decode(errors="ignore").strip()
-                print(f"[RX] '{ch}'")
-
-                #여기서 CAN 상태 업데이트
-                handle_bt_command(ch)
-
-            else:
-                time.sleep(0.001)
-
-    except KeyboardInterrupt:
-        print("\nexit (Ctrl+C)")
-    finally:
-        ser.close()
-        print("UART Closed")
-
-# =========================================================
-# [Class] 구역 상태 및 분석 클래스
 # =========================================================
 
 # =========================================================
