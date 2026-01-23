@@ -202,9 +202,14 @@ def speed_controller():
             is_resverse = _can.get("is_resverse", False)
             current_speed = _can.get("speed_kmh", 0)
             is_brake = _can.get("is_braking",False)
+            steer = _can.get("steer", STEER_CENTER)
         
+        if steer < 70 and steer > 60: # 오버스티어, 전복 방지
+            is_resverse = True
+            is_brake = True
+
         if is_accel and not is_brake:
-            # 가속
+            # 가속 / 뒷방향 가속
             if not is_resverse:
                 new_speed = min(current_speed + SPEED_INCREMENT, MAX_SPEED)
                 with _lock:
@@ -219,13 +224,20 @@ def speed_controller():
                 send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
                 
                 print(f"[ACCEL] Speed: {new_speed}")
-        else:
+
+        else if is_brake:
             # 감속
-            new_speed = 0
+            if current_speed > 0 : # 전진 상황
+                new_speed = max(current_speed - SPEED_DECREMENT, 0) # 후진 방지
+            
+            else : # 후진 상황
+                new_speed = max(current_speed + SPEED_DECREMENT, 0)
+            
             with _lock:
                 _can["speed_kmh"] = new_speed
             send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
         
+
         time.sleep(ACCEL_INTERVAL)
 
 def wheel_controller():
@@ -450,7 +462,7 @@ def ai_data_worker():
                         _zone_state["R"] = res_R
                     
                     # (선택) 분석된 Zone 상태 출력 - 너무 빠르면 주석 처리
-                    # print(f"[Zone] L:{res_L} F:{res_F} R:{res_R}")
+                    print(f"[Zone] L:{res_L} F:{res_F} R:{res_R}")
 
                 except json.JSONDecodeError:
                     print(f"[AI] JSON Error: {raw_str}")
@@ -493,7 +505,7 @@ def main():
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\nStopping...")-
+        print("\nStopping...")
     finally:
         global _stop
         _stop = True
