@@ -84,8 +84,8 @@ class ObjectAnalytics:
 
             # 구역 판단 (L/F/R)
             target_zone = ''
-            if center_x < div_1: target_zone = 'L'
-            elif center_x > div_2: target_zone = 'R'
+            if center_x < div_1: target_zone = 'R'
+            elif center_x > div_2: target_zone = 'L'
             else: target_zone = 'F'
 
             # 해당 구역 상태 업데이트
