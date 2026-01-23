@@ -220,7 +220,7 @@ def speed_controller():
                 with _lock:
                     _can["speed_kmh"] = new_speed
 
-        else if is_brake:
+        elif is_brake:
             # 감속
             if current_speed > 0 : # 전진 상황
                 new_speed = max(current_speed - SPEED_DECREMENT, 0) # 후진 방지
