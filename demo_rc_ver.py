@@ -64,39 +64,43 @@ class ObjectAnalytics:
         Format: {"cls":1, "xmin":..., "ymin":..., "xmax":..., "ymax":..., "first":...}
         """
         current_time = time.time()
-
-        # 데이터 유효성 검사 (xmin 키가 있는지 확인)
-        if json_data and 'xmin' in json_data:
-            xmin = json_data.get('xmin', 0)
-            xmax = json_data.get('xmax', 0)
-            ymin = json_data.get('ymin', 0)
-            ymax = json_data.get('ymax', 0)
+        # 1. "boxes" 키가 있고, 그 값이 리스트인지 확인
+        if json_data and 'boxes' in json_data and isinstance(json_data['boxes'], list):
             
-            # 크기 및 중앙값 계산
-            obj_w = xmax - xmin
-            obj_h = ymax - ymin
-            obj_area = obj_w * obj_h
-            center_x = xmin + (obj_w / 2.0)
+            # 리스트 내 모든 물체를 순회
+            for det in json_data['boxes']:
+                # 데이터 유효성 검사 (xmin 키가 있는지 확인)
+                if json_data and 'xmin' in json_data:
+                    xmin = json_data.get('xmin', 0)
+                    xmax = json_data.get('xmax', 0)
+                    ymin = json_data.get('ymin', 0)
+                    ymax = json_data.get('ymax', 0)
+                    
+                    # 크기 및 중앙값 계산
+                    obj_w = xmax - xmin
+                    obj_h = ymax - ymin
+                    obj_area = obj_w * obj_h
+                    center_x = xmin + (obj_w / 2.0)
 
-            # 화면 3분할 기준선
-            div_1 = self.w / 3.0
-            div_2 = self.w * (2.0 / 3.0)
+                    # 화면 3분할 기준선
+                    div_1 = self.w / 3.5
+                    div_2 = self.w * (2.5 / 3.5)
 
-            # 구역 판단 (L/F/R)
-            target_zone = ''
-            if center_x < div_1: target_zone = 'R'
-            elif center_x > div_2: target_zone = 'L'
-            else: target_zone = 'F'
+                    # 구역 판단 (L/F/R)
+                    target_zone = ''
+                    if center_x < div_1: target_zone = 'R'
+                    elif center_x > div_2: target_zone = 'L'
+                    else: target_zone = 'F'
 
-            # 해당 구역 상태 업데이트
-            self.zones[target_zone].has_obstacle = True
-            
-            # 가까움 여부 판단 (전체 화면의 15% 이상)
-            if (obj_area / self.total_area) > self.close_area_ratio:
-                self.zones[target_zone].is_close = True
-            
-            # 마지막 업데이트 시간 갱신 (Timeout 방지)
-            self.zones[target_zone].last_update_time = current_time
+                    # 해당 구역 상태 업데이트
+                    self.zones[target_zone].has_obstacle = True
+                    
+                    # 가까움 여부 판단 (전체 화면의 15% 이상)
+                    if (obj_area / self.total_area) > self.close_area_ratio:
+                        self.zones[target_zone].is_close = True
+                    
+                    # 마지막 업데이트 시간 갱신 (Timeout 방지)
+                    self.zones[target_zone].last_update_time = current_time
 
         # 타임아웃 처리 (0.5초 동안 업데이트 없는 구역은 Clear 처리)
         for key in self.zones:
