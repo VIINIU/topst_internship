@@ -12,8 +12,8 @@ from Library.IPC_Library import parse_hex_data, parse_string_data, parse_channel
 class VCP_IO:
     # IO 타입
     BREAK_LIGHT = 0x101
-    TURN_SIGNAL = 0x102
-    EMER_SIGNAL = 0x103
+    TURN_SIGNAL = 0x102 #비상등 led (급정지) / 좌, 우회전
+    EMER_SIGNAL = 0x103 
     HEAD_LIGHT = 0x104
     FUEL_L = 0x105
     MOTOR_A = 0x106
@@ -262,27 +262,46 @@ def wheel_controller():
         # 조향 안 할 때는 유지 (자동 복귀 안 함)
         time.sleep(0.05)   # 50ms마다 10씩 → 꾹 누르면 쭉쭉 움직이는 느낌
 
+# =========================================================
+# 🔽 [소연] LED 제어 코드 수정🔽 
+# =========================================================
 
 def emergency_worker():
-    """비상등 플래그(_can['emergency'])를 보고
-       좌/우 깜빡이를 주기적으로 On/Off 한다."""
+    """비상등 및 좌/우 깜빡이 통합 제어"""
     while not _stop:
         with _lock:
             emer = _can.get("emergency", False)
+            left = _can.get("left_blinker", False)
+            right = _can.get("right_blinker", False)
+        
+        on = get_blink_state()
+        action = VCP_IO.ACTION_ON if on else VCP_IO.ACTION_OFF
+
+        # 1순위: 비상등 (둘 다 깜빡임)
         if emer:
-            # BLINK_INTERVAL 기반으로 ON/OFF 결정
-            on = get_blink_state()
-            action = VCP_IO.ACTION_ON if on else VCP_IO.ACTION_OFF
-            # 좌우 모두 같은 상태로 깜빡이기
             send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_LEFT)
             send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_RIGHT)
 
+        # 2순위: 왼쪽 깜빡이만
+        elif left:
+            send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_LEFT)
+            send_ipc_signal(VCP_IO.TURN_SIGNAL, VCP_IO.ACTION_OFF, VCP_IO.SUB_RIGHT)
+
+        # 3순위: 오른쪽 깜빡이만
+        elif right:
+            send_ipc_signal(VCP_IO.TURN_SIGNAL, VCP_IO.ACTION_OFF, VCP_IO.SUB_LEFT)
+            send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_RIGHT)
+
+        # 4순위: 모두 꺼짐
         else:
-            # 비상등이 꺼진 상태인데, 혹시 켜져있으면 한 번만 OFF 보내기
             send_ipc_signal(VCP_IO.TURN_SIGNAL, VCP_IO.ACTION_OFF, VCP_IO.SUB_LEFT)
             send_ipc_signal(VCP_IO.TURN_SIGNAL, VCP_IO.ACTION_OFF, VCP_IO.SUB_RIGHT)
 
-        time.sleep(0.5)  # 너무 자주 돌 필요는 없음
+        time.sleep(0.1)  # 반응 속도를 위해 0.5에서 0.1로 단축 추천
+
+# =========================================================
+# 🔼 [소연] LED 제어 코드 수정 완료 🔼
+# =========================================================
 
 # =========================================================
 # 🔽 [소연] 장애물 회피 관련 코드 추가🔽 
@@ -346,6 +365,9 @@ def emergency_control_logic():
                 _can["is_braking"] = True
                 _can["is_steering"] = False  # 조향도 멈춤
                 _can["avoid_mode"] = True
+                _can["emergency"] = True # 비상등만 on
+                _can["left_blinker"] = False
+                _can["right_blinker"] = False
             
             # # 정지 명령은 긴급하므로 즉시 전송
             # send_ipc_signal(VCP_IO.MOTOR_A, 0)
@@ -358,6 +380,10 @@ def emergency_control_logic():
                 _can["is_steering"] = True
                 _can["is_steer_reverse"] = steer_dir  # True면 왼쪽, False면 오른쪽
                 _can["avoid_mode"] = True
+                _can["emergency"] = False
+                # [수정] 조향 방향에 따라 깜빡이 플래그 설정
+                _can["left_blinker"] = steer_dir      # steer_dir가 True면 왼쪽 ON
+                _can["right_blinker"] = not steer_dir  # steer_dir가 False면 오른쪽 ON
             
             # 2. steer_time 동안 'wheel_controller'가 동작하도록 대기
             # 이 시간 동안 wheel_controller 스레드가 50ms마다 steer 값을 ±10씩 바꿉니다.
@@ -366,11 +392,16 @@ def emergency_control_logic():
             # 3. 조향 종료
             with _lock:
                 _can["is_steering"] = False
+                _can["left_blinker"] = False  # 조향 종료 후 끄기
+                _can["right_blinker"] = False
             print(f"[Logic] Steering Action Finished.")
         
-        else:
+        else: # 장애물 없을 때 -> lane detection
             with _lock:
                 _can["avoid_mode"] = False
+                _can["emergency"] = False
+                _can["left_blinker"] = False
+                _can["right_blinker"] = False
      
         # 메인 루프 주기 조절
         time.sleep(0.1)
