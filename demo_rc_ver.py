@@ -91,9 +91,9 @@ class ObjectAnalytics:
                 # 박스가 커도 중심이 왼쪽에 있으면 왼쪽 장애물로만 판단함
                 target_zone = ''
                 if center_x < div_1:
-                    target_zone = 'L'
-                elif center_x > div_2:
                     target_zone = 'R'
+                elif center_x > div_2:
+                    target_zone = 'L'
                 else:
                     target_zone = 'F'
 
@@ -291,7 +291,7 @@ def wheel_controller():
             send_ipc_signal(VCP_IO.WHEEL, current_steer)
 
         time.sleep(0.05)
-        
+
 # =========================================================
 # 🔽 [소연] LED 제어 코드 수정🔽 
 # =========================================================
