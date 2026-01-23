@@ -315,16 +315,17 @@ def emergency_control_logic():
         do_emergency_stop = False
 
         # ---------------------------------------------------------
-        # 판단부
+        # 판단부(플래그 설정)
         # ---------------------------------------------------------
-        if f_has and l_has and r_has: 
-            do_emergency_stop = True
-            print("[PRIORITY 1] ALL BLOCKED! Emergency Stop.")
-
        
-        elif not f_has: # 2순위: 정면 클리어 (정상 주행 가능)
+        if not f_has: # 1순위: 정면 클리어 (정상 주행 가능) -> lane detection으로 넘겨줄 것
             do_steering = False
             print("[PRIORITY 2] Front Clear. No Action.")
+
+        
+        elif f_has and l_has and r_has: 
+            do_emergency_stop = True
+            print("[PRIORITY 1] ALL BLOCKED! Emergency Stop.")
 
         
         elif f_close or l_close or r_close: # 3순위: 장애물이 가깝거나 정면이 근접한 경우 (긴 조향)
@@ -350,6 +351,7 @@ def emergency_control_logic():
                 _can["is_accelerating"] = False
                 _can["is_braking"] = True
                 _can["is_steering"] = False  # 조향도 멈춤
+                _can["aviod_mode"] = True
             
             # # 정지 명령은 긴급하므로 즉시 전송
             # send_ipc_signal(VCP_IO.MOTOR_A, 0)
@@ -361,6 +363,7 @@ def emergency_control_logic():
             with _lock:
                 _can["is_steering"] = True
                 _can["is_steer_reverse"] = steer_dir  # True면 왼쪽, False면 오른쪽
+                _can["aviod_mode"] = True
             
             # 2. steer_time 동안 'wheel_controller'가 동작하도록 대기
             # 이 시간 동안 wheel_controller 스레드가 50ms마다 steer 값을 ±10씩 바꿉니다.
@@ -370,12 +373,11 @@ def emergency_control_logic():
             with _lock:
                 _can["is_steering"] = False
             print(f"[Logic] Steering Action Finished.")
-
+        
         else:
-            # 아무 조건도 해당 안 될 때 상태 초기화
             with _lock:
-                _can["is_steering"] = False
-
+                _can["aviod_mode"] = False
+     
         # 메인 루프 주기 조절
         time.sleep(0.1)
 # =========================================================
