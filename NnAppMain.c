@@ -1248,14 +1248,38 @@ static void NnDrawResult(app_context_t *pContext)
 
 				if (stable && boxCount > 0) // stable 상태이면서 box가 있을 때만 전송
 				{
+					Box_t selected[3];
+					int selCount = 0;
+
+					// boxCount <= 3 가정
+					// 역순 탐색: 같은 cls가 여러 개면 "뒤에 있는(최근)" 박스가 선택됨
+				for (int i = boxCount - 1; i >= 0; i--)
+				{
+					int cls = boundingBoxes[i].cls;
+
+					// 이미 같은 cls를 담았으면 skip
+					int dup = 0;
+					for (int j = 0; j < selCount; j++)
+					{
+						if (selected[j].cls == cls) { dup = 1; break; }
+					}
+					if (dup) continue;
+
+					selected[selCount++] = boundingBoxes[i];
+					if (selCount >= 3) break;
+				}
+
+				// 선택된 박스들만 묶어서 전송
+				if (selCount > 0)
+				{
 					char buf[1024];
 					int off = 0;
 
 					off += snprintf(buf + off, sizeof(buf) - off, "{\"boxes\":[");
 
-					for (int i = 0; i < boxCount; i++)
+					for (int i = 0; i < selCount; i++)
 					{
-						Box_t *b = &boundingBoxes[i];
+						Box_t *b = &selected[i];
 
 						off += snprintf(buf + off, sizeof(buf) - off,
 							"%s{\"cls\":%d,\"score\":%.2f,"
@@ -1271,6 +1295,7 @@ static void NnDrawResult(app_context_t *pContext)
 					{
 						send(g_wait_client_fd, buf, (size_t)off, MSG_NOSIGNAL | MSG_DONTWAIT);
 					}
+				}
 				}
             }
 
