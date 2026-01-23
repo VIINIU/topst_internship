@@ -106,14 +106,12 @@ static void NnShowUsage(int32_t argc, char *argv[]);
 static int32_t adjustRes(uint16_t *punXres, uint16_t *punYres);
 static int g_wait_server_fd = -1;
 static int g_wait_client_fd = -1;
-static int g_prev_valid = false;
-static int g_prev_cls = -1;
 
+// for detection stability
 static int g_det_win[WIN_N] = {0};
 static int g_det_sum = 0;
 static int g_det_pos = 0;
 static int g_det_filled = 0;
-//static int g_gate_send = 0;
 
 
 #ifdef INTERACTIVE_MODE
@@ -1186,8 +1184,6 @@ static void NnResizeOutputFrame(app_context_t *pContext, ScalerHandle scalerHand
 
 static void NnDrawResult(app_context_t *pContext)
 {
-	static unsigned long long g_frame_id = 0;
-	g_frame_id++;
     unsigned char *outputMapBase = NULL;
     uint16_t outputWidth = 0;
     uint16_t outputHeight = 0;
@@ -1248,44 +1244,34 @@ static void NnDrawResult(app_context_t *pContext)
             if (g_wait_client_fd > 0)
             {
                 int detected = (boxCount > 0) ? 1 : 0;
-    			int stable = update_det_window(detected);
+    			int stable = update_det_window(detected); // 최근 10프레임 중 5프레임 이상에서 detection이 발생했는지 판단
 
-				// stable하지 않으면 전송 안 함
-				if (!stable)
+				if (stable && boxCount > 0) // stable 상태이면서 box가 있을 때만 전송
 				{
-					g_prev_valid = false;
-					g_prev_cls = -1;
-				}
-				else
-				{
-					// stable 상태에서만 전송
-					if (boxCount <= 0)
-					{
-						// stable인데 이번 프레임에 box 없으면 전송 안 하고 first 상태 리셋
-						g_prev_valid = 0; // prev 초기화
-						g_prev_cls = -1;
-					}
-					else
-					{
-						Box_t *b = &boundingBoxes[0];
-						// cls 같으면 같은 객체 취급
-						bool first = (!g_prev_valid || (g_prev_cls != b->cls));
+					char buf[1024];
+					int off = 0;
 
-						char buf[256];
-						int n = snprintf(buf, sizeof(buf),
-							"{\"type\":\"DET\",\"cls\":%d,\"score\":%.2f,"
-							"\"xmin\":%d,\"ymin\":%d,\"xmax\":%d,\"ymax\":%d,\"first\":%s}\n",
+					off += snprintf(buf + off, sizeof(buf) - off, "{\"boxes\":[");
+
+					for (int i = 0; i < boxCount; i++)
+					{
+						Box_t *b = &boundingBoxes[i];
+
+						off += snprintf(buf + off, sizeof(buf) - off,
+							"%s{\"cls\":%d,\"score\":%.2f,"
+							"\"xmin\":%d,\"ymin\":%d,\"xmax\":%d,\"ymax\":%d}",
+							(i == 0 ? "" : ","),
 							b->cls, b->score,
-							b->xmin, b->ymin, b->xmax, b->ymax,
-							first ? "true" : "false");
-
-						send(g_wait_client_fd, buf, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT);
-
-						// 상태 갱신
-						g_prev_valid = 1;
-						g_prev_cls = b->cls;
+							b->xmin, b->ymin, b->xmax, b->ymax);
 					}
-  			    }
+
+					off += snprintf(buf + off, sizeof(buf) - off, "]}\n");
+
+					if (off > 0 && off < (int)sizeof(buf))
+					{
+						send(g_wait_client_fd, buf, (size_t)off, MSG_NOSIGNAL | MSG_DONTWAIT);
+					}
+				}
             }
 
         if(boxCount > 0)
