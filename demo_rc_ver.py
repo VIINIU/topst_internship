@@ -228,6 +228,7 @@ def speed_controller():
         
         time.sleep(ACCEL_INTERVAL)
 
+
 def wheel_controller():
     """L/R 플래그에 따라 steer 값을 0~127 범위에서 ±10씩 변경하고,
        그 값을 그대로 WHEEL IPC로 보내는 스레드."""
@@ -276,6 +277,97 @@ def emergency_worker():
 
         time.sleep(0.5)  # 너무 자주 돌 필요는 없음
 
+# =========================================================
+# 🔽 [소연] 장애물 회피 관련 코드 추가🔽 
+# =========================================================
+def emergency_control_logic():
+    """
+    전방위 차단(Stop) -> 정면 클리어(Straight) -> 근접 장애물(Long) -> 원거리 장애물(Short)
+    """
+    print("[Emergency Logic] Priority-Based Algorithm Started.")
+
+    TIME_SHORT = 0.8
+    TIME_LONG = 1.5
+
+    while not _stop:
+        with _lock:
+            l_has, l_close = _zone_state["L"]
+            f_has, f_close = _zone_state["F"]
+            r_has, r_close = _zone_state["R"]
+
+        # 로컬 제어 변수
+        steer_time = 0.0
+        steer_dir = False
+        do_steering = False
+        do_emergency_stop = False
+
+        # ---------------------------------------------------------
+        # 판단부
+        # ---------------------------------------------------------
+        if f_has and l_has and r_has: 
+            do_emergency_stop = True
+            print("[PRIORITY 1] ALL BLOCKED! Emergency Stop.")
+
+       
+        elif not f_has: # 2순위: 정면 클리어 (정상 주행 가능)
+            do_steering = False
+            print("[PRIORITY 2] Front Clear. No Action.")
+
+        
+        elif f_close or l_close or r_close: # 3순위: 장애물이 가깝거나 정면이 근접한 경우 (긴 조향)
+            do_steering = True
+            steer_time = TIME_LONG
+            # 회피 방향 결정: 왼쪽이 비어있으면 왼쪽(True), 아니면 오른쪽(False)
+            steer_dir = True if not l_has else False
+            print(f"[PRIORITY 3] CLOSE OBSTACLE! Steering {'Left' if steer_dir else 'Right'} (Long)")
+
+        elif f_has: # 4순위: 장애물이 멀리 있는 경우 (짧은 조향)
+            do_steering = True
+            steer_time = TIME_SHORT
+            # 회피 방향 결정
+            steer_dir = True if not l_has else False
+            print(f"[PRIORITY 4] Obstacle Ahead (Far). Steering {'Left' if steer_dir else 'Right'} (Short)")
+
+        # ---------------------------------------------------------
+        # 실제 제어 실행부
+        # ---------------------------------------------------------
+        if do_emergency_stop:
+            with _lock:
+                # 비상 정지 시에는 즉시 모든 제어 플래그를 정지 상태로
+                _can["is_accelerating"] = False
+                _can["is_braking"] = True
+                _can["is_steering"] = False  # 조향도 멈춤
+            
+            # # 정지 명령은 긴급하므로 즉시 전송
+            # send_ipc_signal(VCP_IO.MOTOR_A, 0)
+            # send_ipc_signal(VCP_IO.BREAK_LIGHT, VCP_IO.ACTION_ON)
+            # print("[Logic] EMERGENCY STOP EXECUTED")
+
+        elif do_steering:
+            # 1. 조향 시작 상태 알림
+            with _lock:
+                _can["is_steering"] = True
+                _can["is_steer_reverse"] = steer_dir  # True면 왼쪽, False면 오른쪽
+            
+            # 2. steer_time 동안 'wheel_controller'가 동작하도록 대기
+            # 이 시간 동안 wheel_controller 스레드가 50ms마다 steer 값을 ±10씩 바꿉니다.
+            time.sleep(steer_time) 
+            
+            # 3. 조향 종료
+            with _lock:
+                _can["is_steering"] = False
+            print(f"[Logic] Steering Action Finished.")
+
+        else:
+            # 아무 조건도 해당 안 될 때 상태 초기화
+            with _lock:
+                _can["is_steering"] = False
+
+        # 메인 루프 주기 조절
+        time.sleep(0.1)
+# =========================================================
+# 🔼 [소연] 장애물 회피 관련 코드 끝 🔼
+# =========================================================
 
 # =========================================================
 # BT_제어_함수
