@@ -4,11 +4,11 @@ import json
 AI_G_IP = "192.168.0.101"
 PORT = 9999
 
-def fmt_score(v):
+def fmt_num(v, nd=2):
     if v is None:
         return "N/A"
     try:
-        return f"{float(v):.2f}"
+        return f"{float(v):.{nd}f}"
     except Exception:
         return str(v)
 
@@ -37,26 +37,35 @@ def main():
                 print(f"[D3-G] Raw: {line[:200]}")
                 continue
 
-            # AI-G가 안 보내면 기본값 처리
-            det_type = msg.get("type", "DET")
-            cls_id = msg.get("cls", "N/A")
-            score = msg.get("score", None)
-            xmin = msg.get("xmin", "N/A")
-            ymin = msg.get("ymin", "N/A")
-            xmax = msg.get("xmax", "N/A")
-            ymax = msg.get("ymax", "N/A")
-            first = msg.get("first", False)       # 추가
+            boxes = msg.get("boxes", None)
+            if not isinstance(boxes, list):
+                print("[D3-G] Unexpected JSON format (missing 'boxes' list)")
+                print(f"[D3-G] Raw JSON: {msg}")
+                continue
 
-            print("\n[D3-G] Inference Result (ALL JSON FIELDS)")
+            print("\n[D3-G] Inference Result (BOXES)")
             print("----------------------------------------")
-            print(f"type: {det_type}")
-            print(f"cls: {cls_id}")
-            print(f"score: {score}")
-            print(f"xmin: {xmin}")
-            print(f"ymin: {ymin}")
-            print(f"xmax: {xmax}")
-            print(f"ymax: {ymax}")
-            print(f"first: {first}")
+            print(f"boxes: {len(boxes)}")
+
+            for i, b in enumerate(boxes):
+                if not isinstance(b, dict):
+                    print(f"  - box[{i}] invalid: {b}")
+                    continue
+
+                cls_id = b.get("cls", "N/A")
+                score = b.get("score", None)
+                xmin = b.get("xmin", "N/A")
+                ymin = b.get("ymin", "N/A")
+                xmax = b.get("xmax", "N/A")
+                ymax = b.get("ymax", "N/A")
+
+                print(f"\n  [box {i}]")
+                print(f"    cls  : {cls_id}")
+                print(f"    score: {fmt_num(score, 2)}")
+                print(f"    xmin : {xmin}")
+                print(f"    ymin : {ymin}")
+                print(f"    xmax : {xmax}")
+                print(f"    ymax : {ymax}")
 
     except KeyboardInterrupt:
         print("\n[D3-G] Stopped")
