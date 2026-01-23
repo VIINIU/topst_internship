@@ -59,6 +59,8 @@
 #define INTERACTIVE_MODE
 #define MAX_CLASSES 256
 #define STABLE_M 5
+#define WIN_N 10
+#define WIN_M 5
 
 typedef struct
 {
@@ -104,8 +106,15 @@ static void NnShowUsage(int32_t argc, char *argv[]);
 static int32_t adjustRes(uint16_t *punXres, uint16_t *punYres);
 static int g_wait_server_fd = -1;
 static int g_wait_client_fd = -1;
-static int g_prev_valid = 0;
+static int g_prev_valid = false;
 static int g_prev_cls = -1;
+
+static int g_det_win[WIN_N] = {0};
+static int g_det_sum = 0;
+static int g_det_pos = 0;
+static int g_det_filled = 0;
+//static int g_gate_send = 0;
+
 
 #ifdef INTERACTIVE_MODE
 static void *NnInteractive(void *arg);
@@ -130,6 +139,8 @@ static const struct {
 	.npuRunModeStr = {"SyncMode", "AsyncMode"},
 	.imgFmtStr = {"ARGB8888", "RGB888"},
 };
+
+
 
 /* ========================================================================== */
 /*                            Global Variables                                */
@@ -228,6 +239,33 @@ static void track_update(int cls, float x1, float y1, float x2, float y2)
     g_track[cls].last_box.xmax = (int)(x2 + 0.5f);
     g_track[cls].last_box.ymax = (int)(y2 + 0.5f);
 } */
+
+static int update_det_window(int detected)
+{
+   // 아직 10개가 안찼으면 채움
+    if (!g_det_filled)
+    {
+        g_det_win[g_det_pos] = (uint8_t)detected;
+        g_det_sum += detected;
+
+        g_det_pos++;
+        if (g_det_pos >= WIN_N) { g_det_pos = 0; g_det_filled = 1; }
+    }
+    else
+    {
+        // ring buffer: 이전 값 빼고 새 값 더함
+        g_det_sum -= g_det_win[g_det_pos];
+        g_det_win[g_det_pos] = (uint8_t)detected;
+        g_det_sum += detected;
+
+        g_det_pos++;
+        if (g_det_pos >= WIN_N) g_det_pos = 0;
+    }
+
+    // 10프레임이 다 찼고, 그 중 5개 이상이면 stable
+    if (g_det_filled && g_det_sum >= WIN_M) return 1;
+    return 0;
+}
 
 
 static void NnShowUsage(int32_t argc, char *argv[])
@@ -1148,6 +1186,8 @@ static void NnResizeOutputFrame(app_context_t *pContext, ScalerHandle scalerHand
 
 static void NnDrawResult(app_context_t *pContext)
 {
+	static unsigned long long g_frame_id = 0;
+	g_frame_id++;
     unsigned char *outputMapBase = NULL;
     uint16_t outputWidth = 0;
     uint16_t outputHeight = 0;
@@ -1207,31 +1247,45 @@ static void NnDrawResult(app_context_t *pContext)
 
             if (g_wait_client_fd > 0)
             {
-                if (boxCount <= 0)
-                {
-                    // 감지 끊김 -> 다음에 다시 잡히면 first=1 되도록 상태 초기화
-                    g_prev_valid = 0;
-                    g_prev_cls = -1;
-                }
-                else
-                {
-                    Box_t *b = &boundingBoxes[0];
+                int detected = (boxCount > 0) ? 1 : 0;
+    			int stable = update_det_window(detected);
 
-                    // cls만 같으면 같은 객체로 간주
-                    int first = (!g_prev_valid || (g_prev_cls != b->cls)) ? 1 : 0;
+				// stable하지 않으면 전송 안 함
+				if (!stable)
+				{
+					g_prev_valid = false;
+					g_prev_cls = -1;
+				}
+				else
+				{
+					// stable 상태에서만 전송
+					if (boxCount <= 0)
+					{
+						// stable인데 이번 프레임에 box 없으면 전송 안 하고 first 상태 리셋
+						g_prev_valid = 0; // prev 초기화
+						g_prev_cls = -1;
+					}
+					else
+					{
+						Box_t *b = &boundingBoxes[0];
+						// cls 같으면 같은 객체 취급
+						bool first = (!g_prev_valid || (g_prev_cls != b->cls));
 
-                    //cls + bbox + first만 전송
-                    char buf[256];
-                    int n = snprintf(buf, sizeof(buf),
-                        "{\"cls\":%d,\"xmin\":%d,\"ymin\":%d,\"xmax\":%d,\"ymax\":%d,\"first\":%d}\n",
-                        b->cls, b->xmin, b->ymin, b->xmax, b->ymax, first);
+						char buf[256];
+						int n = snprintf(buf, sizeof(buf),
+							"{\"type\":\"DET\",\"cls\":%d,\"score\":%.2f,"
+							"\"xmin\":%d,\"ymin\":%d,\"xmax\":%d,\"ymax\":%d,\"first\":%s}\n",
+							b->cls, b->score,
+							b->xmin, b->ymin, b->xmax, b->ymax,
+							first ? "true" : "false");
 
-                    send(g_wait_client_fd, buf, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT);
+						send(g_wait_client_fd, buf, (size_t)n, MSG_NOSIGNAL | MSG_DONTWAIT);
 
-                    // 상태 갱신
-                    g_prev_valid = 1;
-                    g_prev_cls = b->cls;
-                }
+						// 상태 갱신
+						g_prev_valid = 1;
+						g_prev_cls = b->cls;
+					}
+  			    }
             }
 
         if(boxCount > 0)
