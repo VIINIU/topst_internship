@@ -345,7 +345,7 @@ def emergency_control_logic():
                 _can["is_accelerating"] = False
                 _can["is_braking"] = True
                 _can["is_steering"] = False  # 조향도 멈춤
-                _can["aviod_mode"] = True
+                _can["avoid_mode"] = True
             
             # # 정지 명령은 긴급하므로 즉시 전송
             # send_ipc_signal(VCP_IO.MOTOR_A, 0)
@@ -357,7 +357,7 @@ def emergency_control_logic():
             with _lock:
                 _can["is_steering"] = True
                 _can["is_steer_reverse"] = steer_dir  # True면 왼쪽, False면 오른쪽
-                _can["aviod_mode"] = True
+                _can["avoid_mode"] = True
             
             # 2. steer_time 동안 'wheel_controller'가 동작하도록 대기
             # 이 시간 동안 wheel_controller 스레드가 50ms마다 steer 값을 ±10씩 바꿉니다.
@@ -370,7 +370,7 @@ def emergency_control_logic():
         
         else:
             with _lock:
-                _can["aviod_mode"] = False
+                _can["avoid_mode"] = False
      
         # 메인 루프 주기 조절
         time.sleep(0.1)
@@ -574,14 +574,18 @@ def main():
     t_ai = threading.Thread(target=ai_data_worker, daemon=True, name="AI_Worker")
     t_ai.start()
     
-    # 블루투스 송신 스레드
-    t = threading.Thread(target=bt_car, daemon=True)
-    t.start()
+    # # 블루투스 송신 스레드
+    # t = threading.Thread(target=bt_car, daemon=True)
+    # t.start()
     
     # 🚗 속도 제어 스레드 
     t_speed = threading.Thread(target=speed_controller, daemon=True, name="speed_controller")
     t_speed.start()
     
+    # [추가] 장애물 회피 제어 스레드 활성화
+    t_avoid = threading.Thread(target=emergency_control_logic, daemon=True, name="Avoid_Logic")
+    t_avoid.start()
+
     # 비상등 제어 스레드
     t_emer = threading.Thread(target=emergency_worker, daemon=True, name="emergency_controller")
     t_emer.start()
