@@ -4,6 +4,14 @@ import json
 AI_G_IP = "192.168.0.101"
 PORT = 9999
 
+def fmt_score(v):
+    if v is None:
+        return "N/A"
+    try:
+        return f"{float(v):.2f}"
+    except Exception:
+        return str(v)
+
 def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.connect((AI_G_IP, PORT))
@@ -31,12 +39,13 @@ def main():
 
             # AI-G가 안 보내면 기본값 처리
             det_type = msg.get("type", "DET")
-            cls_id = msg.get("cls")
-            score = msg.get("score", "N/A")   # AI-G에서 안 보내면 N/A
-            xmin = msg.get("xmin")
-            ymin = msg.get("ymin")
-            xmax = msg.get("xmax")
-            ymax = msg.get("ymax")
+            cls_id = msg.get("cls", "N/A")
+            score = msg.get("score", None)
+            xmin = msg.get("xmin", "N/A")
+            ymin = msg.get("ymin", "N/A")
+            xmax = msg.get("xmax", "N/A")
+            ymax = msg.get("ymax", "N/A")
+            first = msg.get("first", False)       # 추가
 
             print("\n[D3-G] Inference Result (ALL JSON FIELDS)")
             print("----------------------------------------")
@@ -47,6 +56,7 @@ def main():
             print(f"ymin: {ymin}")
             print(f"xmax: {xmax}")
             print(f"ymax: {ymax}")
+            print(f"first: {first}")
 
     except KeyboardInterrupt:
         print("\n[D3-G] Stopped")
