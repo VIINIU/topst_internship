@@ -54,66 +54,82 @@ class ObjectAnalytics:
         self.w = width
         self.h = height
         self.total_area = width * height
-        self.close_area_ratio = 0.15
-        self.timeout = 0.5
-        self.zones = {'L': ClearCheck(), 'F': ClearCheck(), 'R': ClearCheck()}
+        self.close_area_ratio = 0.15  # 15% 이상이면 가깝다고 판단
+        self.timeout = 0.5            # 0.5초 미감지 시 해제
+
+        self.zones = {
+            'L': ClearCheck(),
+            'F': ClearCheck(),
+            'R': ClearCheck()
+        }
 
     def update_status(self, json_data: dict):
         """
-        C코드(NnAppMain.c)에서 보내주는 단일 객체 포맷을 처리
-        Format: {"cls":1, "xmin":..., "ymin":..., "xmax":..., "ymax":..., "first":...}
+        [다중 객체 + 구역 침범 로직]
+        JSON 포맷: {"boxes": [{"cls":1, "xmin":...}, {"cls":5, "xmin":...}]}
+        여러 박스 중 하나라도 구역을 침범하면 해당 구역을 장애물로 판단함.
         """
         current_time = time.time()
-        # 1. "boxes" 키가 있고, 그 값이 리스트인지 확인
+
+        # 1. "boxes" 키가 있고, 리스트인지 확인
         if json_data and 'boxes' in json_data and isinstance(json_data['boxes'], list):
             
-            # 리스트 내 모든 물체를 순회
+            # 리스트 내의 모든 박스를 순회
             for det in json_data['boxes']:
-                # 데이터 유효성 검사 (xmin 키가 있는지 확인)
-                if json_data and 'xmin' in json_data:
-                    xmin = json_data.get('xmin', 0)
-                    xmax = json_data.get('xmax', 0)
-                    ymin = json_data.get('ymin', 0)
-                    ymax = json_data.get('ymax', 0)
-                    
-                    # 크기 및 중앙값 계산
-                    obj_w = xmax - xmin
-                    obj_h = ymax - ymin
-                    obj_area = obj_w * obj_h
-                    center_x = xmin + (obj_w / 2.0)
+                if not isinstance(det, dict): continue
 
-                    # 화면 3분할 기준선
-                    div_1 = self.w / 3.5
-                    div_2 = self.w * (2.5 / 3.5)
+                # 좌표 추출
+                xmin = det.get('xmin', 0)
+                xmax = det.get('xmax', 0)
+                ymin = det.get('ymin', 0)
+                ymax = det.get('ymax', 0)
+                
+                # 크기 계산
+                obj_w = xmax - xmin
+                obj_h = ymax - ymin
+                obj_area = obj_w * obj_h
+                
+                # 가깝냐? (하나라도 가까우면 True)
+                is_close = (obj_area / self.total_area) > self.close_area_ratio
 
-                    # 구역 판단 (L/F/R)
-                    target_zone = ''
-                    if center_x < div_1: target_zone = 'R'
-                    elif center_x > div_2: target_zone = 'L'
-                    else: target_zone = 'F'
+                # 화면 3분할 기준선
+                div_1 = self.w / 3.0       # 약 266px
+                div_2 = self.w * (2.0/3.0) # 약 533px
 
-                    # 해당 구역 상태 업데이트
-                    self.zones[target_zone].has_obstacle = True
-                    
-                    # 가까움 여부 판단 (전체 화면의 15% 이상)
-                    if (obj_area / self.total_area) > self.close_area_ratio:
-                        self.zones[target_zone].is_close = True
-                    
-                    # 마지막 업데이트 시간 갱신 (Timeout 방지)
-                    self.zones[target_zone].last_update_time = current_time
+                # [구역별 침범 여부 확인]
+                # 하나의 박스가 여러 구역에 걸쳐 있을 수 있음 (L, F, R 모두 체크)
 
-        # 타임아웃 처리 (0.5초 동안 업데이트 없는 구역은 Clear 처리)
+                # 1) Left 구역 침범 (Box의 시작점이 1분면보다 왼쪽)
+                if xmin < div_1:
+                    self.zones['L'].has_obstacle = True
+                    if is_close: self.zones['L'].is_close = True
+                    self.zones['L'].last_update_time = current_time
+
+                # 2) Right 구역 침범 (Box의 끝점이 2분면보다 오른쪽)
+                if xmax > div_2:
+                    self.zones['R'].has_obstacle = True
+                    if is_close: self.zones['R'].is_close = True
+                    self.zones['R'].last_update_time = current_time
+
+                # 3) Front 구역 침범 (Box가 중앙 구역과 교차)
+                # 조건: (Box Left < Zone Right) AND (Box Right > Zone Left)
+                if xmin < div_2 and xmax > div_1:
+                    self.zones['F'].has_obstacle = True
+                    if is_close: self.zones['F'].is_close = True
+                    self.zones['F'].last_update_time = current_time
+
+        # 2. 타임아웃 처리 (오랫동안 감지 안 된 구역 초기화)
         for key in self.zones:
             if current_time - self.zones[key].last_update_time > self.timeout:
                 self.zones[key].has_obstacle = False
                 self.zones[key].is_close = False
 
+        # 3. 결과 반환
         return (
             (self.zones['L'].has_obstacle, self.zones['L'].is_close),
             (self.zones['F'].has_obstacle, self.zones['F'].is_close),
             (self.zones['R'].has_obstacle, self.zones['R'].is_close)
         )
-
 
 # =========================================================
 # 🔼 [유빈] AI-G 수신 및 판단용 전역 변수 선언, 클래스, 함수 선언 끝 🔼
@@ -165,7 +181,7 @@ _can = {"park": False,
         "is_resverse": False,
         "is_steering": False,
         "is_steer_reverse": False,
-        "avoid_mode": False
+        "avoid_mode": False,
         "target_steer" : 65
         } #[소연] 장애물 회피 플래그  
 
@@ -254,16 +270,16 @@ def wheel_controller():
             target_steer = _can.get("target_steer", False)
 
         if is_emergency:
-            if target_steer = 1:
+            if target_steer == 1:
                 if is_steer_reverse:
-                    new_steer = min((STEER_MAX + STEER_CENTER)/2, steer + STEER_STEP*2)
+                    new_steer = min((STEER_MAX + STEER_CENTER)/2, steer + STEER_STEP)
                 else:
-                    new_steer = max((STEER_MIN + STEER_CENTER)/2, steer - STEER_STEP*2)
-            else
+                    new_steer = max((STEER_MIN + STEER_CENTER)/2, steer - STEER_STEP)
+            else:
                 if is_steer_reverse:
-                    new_steer = min(STEER_MAX, steer + STEER_STEP*2)
+                    new_steer = min(STEER_MAX, steer + STEER_STEP)
                 else:
-                    new_steer = max(STEER_MIN, steer - STEER_STEP*2)
+                    new_steer = max(STEER_MIN, steer - STEER_STEP)
         
         elif is_steering:
             # 왼쪽 (reverse=True) / 오른쪽 (reverse=False)
