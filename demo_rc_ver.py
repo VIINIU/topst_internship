@@ -160,7 +160,8 @@ _can = {"park": False,
         "is_braking": False,
         "is_resverse": False,
         "is_steering": False,
-        "is_steer_reverse": False}  
+        "is_steer_reverse": False
+        "avoid_mode": False,} #[소연] 장애물 회피 플래그  
 
 _lock   = threading.Lock()
 _stop   = False
