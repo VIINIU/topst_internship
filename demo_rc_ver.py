@@ -1,6 +1,7 @@
 
 import json, time, socket, threading, http.client
 import serial
+import select  # <--- 이 줄이 꼭 필요합니다!
 from urllib.parse import urlparse
 from typing import Any, Dict
 import argparse
@@ -517,43 +518,63 @@ def ai_data_worker():
         sock = None
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(3.0)
+            sock.settimeout(3.0) # 연결 시도 타임아웃
             print(f"[AI] Connecting...")
-            sock.connect((AI_G_IP, AI_PORT))
-            print(f"[AI] Connected! Waiting for data...")
+            
+            try:
+                sock.connect((AI_G_IP, AI_PORT))
+                print(f"[AI] Connected! Waiting for data...")
+            except socket.error:
+                print(f"[AI] Connection failed. Retrying...")
+                time.sleep(2)
+                continue
+            
+            # 연결 후에는 타임아웃을 None(Blocking)으로 두거나 select로 제어합니다.
+            sock.settimeout(None)
             
             f = sock.makefile("r", encoding="utf-8", newline="\n")
-            sock.settimeout(None) 
 
             while not _stop:
-                line = f.readline()
-                if not line:
-                    print("[AI] Server Disconnected.")
-                    break
+                # [핵심 수정] select를 사용하여 0.2초 동안 데이터가 있는지 '검사'만 함
+                # readable에 sock이 들어있으면 데이터가 온 것, 없으면 타임아웃(데이터 없음)
+                readable, _, _ = select.select([sock], [], [], 0.2)
+
+                data = {}
+
+                if sock in readable:
+                    # 1. 데이터가 도착함 -> 읽기 시도
+                    try:
+                        line = f.readline()
+                        if not line: # 빈 문자열이면 서버가 연결을 끊은 것
+                            print("[AI] Server Disconnected (EOF).")
+                            break
+                        
+                        raw_str = line.strip()
+                        if raw_str:
+                            # print(f"[RAW] {raw_str}")
+                            try:
+                                data = json.loads(raw_str)
+                            except json.JSONDecodeError:
+                                print(f"[AI] JSON Error: {raw_str}")
+                                
+                    except Exception as e:
+                        print(f"[AI] Read Error: {e}")
+                        break
+                else:
+                    # 2. 0.2초 동안 데이터 안 옴 (Timeout) -> 장애물 소멸 로직 수행
+                    # 아무것도 하지 않고 pass하면 아래 update_status({}) 가 실행됨
+                    pass
+
+                # 3. 상태 업데이트
+                # 데이터가 있으면(data 채워짐) -> 장애물 갱신
+                # 데이터가 없으면(data 빈 딕셔너리) -> 내부 타이머가 흘러가며 장애물 해제
+                res_L, res_F, res_R = analyzer.update_status(data)
                 
-                # 1. [모니터링] 들어온 Raw Data 바로 출력
-                raw_str = line.strip()
-                if not raw_str: continue
-                print(f"[RAW] {raw_str}") # 너무 시끄러우면 주석 처리
-
-                try:
-                    # 2. JSON 파싱
-                    data = json.loads(raw_str)
-                    
-                    # 3. 상태 업데이트 (boxes 리스트 처리)
-                    res_L, res_F, res_R = analyzer.update_status(data)
-                    
-                    # 4. 전역 변수 공유
-                    with _lock:
-                        _zone_state["L"] = res_L
-                        _zone_state["F"] = res_F
-                        _zone_state["R"] = res_R
-                    
-                    # 5. 상태 출력 (T/F)
-                    print(f"[ZONE] L:{res_L} | F:{res_F} | R:{res_R}")
-
-                except json.JSONDecodeError:
-                    print(f"[AI] JSON Error: {raw_str}")
+                # 4. 전역 변수 공유
+                with _lock:
+                    _zone_state["L"] = res_L
+                    _zone_state["F"] = res_F
+                    _zone_state["R"] = res_R
         
         except Exception as e:
             print(f"[AI] Connection Error: {e}")
@@ -563,39 +584,56 @@ def ai_data_worker():
                 try: sock.close()
                 except: pass
 
-
 # =========================================================
 # 2. [추가] 바퀴 자동 정렬 워커 (Console Worker 역할 보조)
 # =========================================================
 def auto_align_worker():
     """
-    장애물 회피 모드(avoid_mode)가 해제되는 순간을 감지하여,
-    논리적/물리적 바퀴를 즉시 중앙으로 정렬시킴 (브레이크 해제 유도)
+    장애물 회피(avoid_mode)가 끝났을 때, 
+    직접 IPC를 쏘지 않고 'is_steering'과 'is_steer_reverse' 플래그를 조작하여
+    wheel_controller가 바퀴를 중앙(65)으로 정렬하도록 유도함.
     """
     print("[Align Worker] Started monitoring avoidance state.")
     
     was_avoiding = False
     CENTER = 65
+    TOLERANCE = 5 # 중앙으로 인정할 오차 범위
 
     while not _stop:
         with _lock:
             is_avoid = _can.get("avoid_mode", False)
         
-        # [감지] 회피 모드가 켜져있다가(True) -> 꺼짐(False)으로 바뀌는 순간
+        # [감지] 회피 모드: True -> False (상황 종료)
         if was_avoiding and not is_avoid:
-            print("[Align Worker] Avoidance finished. Force centering wheels.")
-            
-            with _lock:
-                # 1. [핵심] 논리적 변수를 즉시 중앙으로 설정
-                # 이렇게 해야 speed_controller가 "안전 범위"로 인식하고 브레이크를 풂
-                _can["steer"] = CENTER
+            print("[Align Worker] Avoidance finished. Steering to Center...")
+
+            # 바퀴가 중앙 근처에 올 때까지 루프를 돌며 플래그를 잡음
+            while True:
+                with _lock:
+                    current_steer = _can.get("steer", CENTER)
+                    
+                    # 1. 종료 조건: 이미 중앙(오차범위 내)이면 정렬 중단
+                    if abs(current_steer - CENTER) <= TOLERANCE:
+                        _can["is_steering"] = False
+                        # 확실하게 65로 마무리
+                        _can["steer"] = CENTER 
+                        break
+
+                    # 2. 방향 결정 및 조향 활성화
+                    _can["is_steering"] = True
+                    
+                    if current_steer < CENTER:
+                        # 현재가 65보다 작으면(오른쪽?) -> 왼쪽(Reverse)으로 돌려야 커짐
+                        _can["is_steer_reverse"] = True 
+                    else:
+                        # 현재가 65보다 크면(왼쪽?) -> 오른쪽(Normal)으로 돌려야 작아짐
+                        _can["is_steer_reverse"] = False
                 
-                # 필요하다면 target_steer도 초기화 (필수는 아님)
-                _can["target_steer"] = CENTER 
+                # wheel_controller가 움직일 시간을 줌 (매우 중요)
+                time.sleep(0.05) 
             
-            # 2. 물리적 하드웨어로 중앙 정렬 명령 전송
-            send_ipc_signal(VCP_IO.WHEEL, CENTER)
-            
+            print("[Align Worker] Alignment Complete.")
+
         was_avoiding = is_avoid
         time.sleep(0.05)
 
