@@ -42,6 +42,7 @@ _zone_state = {
     "R": (False, False)
 }
 
+
 # [Class] 구역 상태 및 분석 클래스
 class ClearCheck:
     def __init__(self):
@@ -49,19 +50,44 @@ class ClearCheck:
         self.is_close = False
         self.last_update_time = 0.0
 
+class ClearCheck:
+    def __init__(self):
+        self.has_obstacle = False
+        self.is_close = False
+        self.last_update_time = 0.0
+
 class ObjectAnalytics:
-    def __init__(self, width=img_width, height=img_height):
+    def __init__(self, width=800, height=480):
         self.w = width
         self.h = height
         self.total_area = width * height
         self.close_area_ratio = 0.15
-        self.timeout = 0.5
+        
+        # [수정] 장애물 미감지 시 플래그 해제 대기 시간 (0.5 -> 1.0초로 변경)
+        self.timeout = 0.5  
+        
         self.zones = {'L': ClearCheck(), 'F': ClearCheck(), 'R': ClearCheck()}
+        
+        # [이전 요청 유지] 프레임 카운트 및 이전 결과 저장 변수
+        self.frame_count = 0
+        self.last_result = (
+            (False, False),
+            (False, False),
+            (False, False)
+        )
 
     def update_status(self, json_data: dict):
         """
-        [수정됨] 박스의 '중심점'을 기준으로 L/F/R 중 하나만 판별
+        [유지] 5프레임마다 한 번씩만 연산 수행 (나머지는 이전 상태 리턴)
+        [수정] 타임아웃 1초 적용
         """
+        self.frame_count += 1
+
+        # 5번째 프레임이 아니면 이전에 저장된 결과를 바로 반환 (연산 건너뜀)
+        if self.frame_count % 30 != 0:
+            return self.last_result
+
+        # === 아래부터는 5프레임마다 실행되는 실제 로직 ===
         current_time = time.time()
 
         if json_data and 'boxes' in json_data and isinstance(json_data['boxes'], list):
@@ -78,7 +104,7 @@ class ObjectAnalytics:
                 obj_w = xmax - xmin
                 obj_h = ymax - ymin
                 obj_area = obj_w * obj_h
-                center_x = xmin + (obj_w / 2.0) # 박스의 가로 중심
+                center_x = xmin + (obj_w / 2.0) 
 
                 # 가깝냐?
                 is_close = (obj_area / self.total_area) > self.close_area_ratio
@@ -87,13 +113,12 @@ class ObjectAnalytics:
                 div_1 = self.w / 3.0       
                 div_2 = self.w * (2.0 / 3.0) 
 
-                # [로직 변경] 중심점이 위치한 구역 하나만 True로 설정
-                # 박스가 커도 중심이 왼쪽에 있으면 왼쪽 장애물로만 판단함
+                # 중심점이 위치한 구역 판단
                 target_zone = ''
                 if center_x < div_1:
-                    target_zone = 'R'
-                elif center_x > div_2:
                     target_zone = 'L'
+                elif center_x > div_2:
+                    target_zone = 'R'
                 else:
                     target_zone = 'F'
 
@@ -101,19 +126,24 @@ class ObjectAnalytics:
                 self.zones[target_zone].has_obstacle = True
                 if is_close:
                     self.zones[target_zone].is_close = True
+                # 장애물이 감지되면 마지막 감지 시간을 현재 시간으로 갱신
                 self.zones[target_zone].last_update_time = current_time
 
-        # 타임아웃 처리
+        # [타임아웃 처리] 
+        # 마지막 감지 시간으로부터 1.0초(self.timeout)가 지날 때까지는 False로 바꾸지 않음
         for key in self.zones:
             if current_time - self.zones[key].last_update_time > self.timeout:
                 self.zones[key].has_obstacle = False
                 self.zones[key].is_close = False
 
-        return (
+        # 결과 저장 (다음 4프레임 동안 사용)
+        self.last_result = (
             (self.zones['L'].has_obstacle, self.zones['L'].is_close),
             (self.zones['F'].has_obstacle, self.zones['F'].is_close),
             (self.zones['R'].has_obstacle, self.zones['R'].is_close)
         )
+
+        return self.last_result
 
 # =========================================================
 # 🔼 [유빈] AI-G 수신 및 판단용 전역 변수 선언, 클래스, 함수 선언 끝 🔼
@@ -211,8 +241,10 @@ def speed_controller():
             is_brake = _can.get("is_braking",False)
             steer = _can.get("steer", STEER_CENTER)
         
-        if steer < 80 and steer > 50: # 오버스티어, 전복 방지
+        if 50 < steer < 80: # 오버스티어, 전복 방지
             is_brake = True
+        else :
+            pass
 
         if is_accel and not is_brake:
             # 가속 / 뒷방향 가속
@@ -344,15 +376,15 @@ def emergency_worker():
 def emergency_control_logic():
     """
     장애물 위치에 따라 회피할 '목표 조향각(target_steer)'을 설정
+    장애물이 사라지면 바퀴를 정렬한 후 제어권 해제
     """
     print("[Emergency Logic] Started.")
 
-    # 하드웨어 세팅에 따른 각도 설정 (STEER_CENTER=65)
-    # 값이 클수록 왼쪽, 작을수록 오른쪽이라고 가정 (기존 코드 wheel_controller 참조)
-    HARD_LEFT = 127   # 급커브 (왼쪽 최대)
-    HARD_RIGHT = 0    # 급커브 (오른쪽 최대)
-    SOFT_LEFT = 95    # 완만 (중앙 + 30)
-    SOFT_RIGHT = 35   # 완만 (중앙 - 30)
+    # 하드웨어 세팅
+    HARD_LEFT = 127   
+    HARD_RIGHT = 0    
+    SOFT_LEFT = 95    
+    SOFT_RIGHT = 35   
     CENTER = 65
 
     while not _stop:
@@ -360,79 +392,79 @@ def emergency_control_logic():
             l_has, l_close = _zone_state["L"]
             f_has, f_close = _zone_state["F"]
             r_has, r_close = _zone_state["R"]
+            current_steer = _can.get("steer", CENTER) # 현재 바퀴 각도 확인
 
-        # 제어 변수
+        # 제어 변수 초기화
         target_angle = CENTER
         avoid_active = False
         do_emergency_stop = False
         
-        # ---------------------------------------------------------
-        # 판단부 (우선순위: 정지 > 근접회피 > 원거리회피 > 직진)
-        # ---------------------------------------------------------
-        
         # 1. 전방위 차단 -> 정지
         if f_has and l_has and r_has:
             do_emergency_stop = True
-            print("[LOGIC] ALL BLOCKED -> STOP")
 
-        # 2. 전방은 뚫림 -> 직진 (회피 모드 해제)
+        # 2. 전방은 뚫림 -> 직진 (회피 모드 해제 로직으로 이동)
         elif not f_has:
             avoid_active = False
-            # print("[LOGIC] Front Clear -> Go Straight")
 
-        # 3. 근접 장애물 (가까움) -> 급커브 (Long Turn)
+        # 3. 근접 장애물 -> 급커브
         elif f_close or l_close or r_close:
             avoid_active = True
-            # 왼쪽이 막혀있으면 오른쪽으로, 아니면 왼쪽으로
             if l_has: 
                 target_angle = HARD_RIGHT
-                print("[LOGIC] Close Obstacle -> Hard Right")
             else:
                 target_angle = HARD_LEFT
-                print("[LOGIC] Close Obstacle -> Hard Left")
 
-        # 4. 원거리 장애물 -> 완만하게 회피 (Short Turn)
+        # 4. 원거리 장애물 -> 완만 회피
         elif f_has:
             avoid_active = True
             if l_has:
                 target_angle = SOFT_RIGHT
-                print("[LOGIC] Far Obstacle -> Soft Right")
             else:
                 target_angle = SOFT_LEFT
-                print("[LOGIC] Far Obstacle -> Soft Left")
 
-        # ---------------------------------------------------------
+        # ----------------------------------------
         # 상태 업데이트 (제어 명령)
-        # ---------------------------------------------------------
+        # ----------------------------------------
         with _lock:
             if do_emergency_stop:
                 _can["is_accelerating"] = False
                 _can["is_braking"] = True
                 _can["avoid_mode"] = True
                 _can["emergency"] = True
-                # 정지 시 핸들은 중앙 유지 혹은 현상태 유지
             
             elif avoid_active:
+                # [회피 중]
                 _can["avoid_mode"] = True
-                _can["target_steer"] = target_angle # [핵심] 목표 각도 설정
-                _can["is_steering"] = True          # wheel_controller 활성화
+                _can["target_steer"] = target_angle
+                _can["is_steering"] = True 
                 _can["emergency"] = False
                 
-                # 깜빡이 연동
-                if target_angle > CENTER: # 왼쪽 회전 중
+                # 깜빡이
+                if target_angle > CENTER: 
                     _can["left_blinker"] = True
                     _can["right_blinker"] = False
-                elif target_angle < CENTER: # 오른쪽 회전 중
+                elif target_angle < CENTER: 
                     _can["left_blinker"] = False
                     _can["right_blinker"] = True
             
             else:
-                # 회피 상황 아님 -> 운전자/기본 제어권으로 넘김
-                _can["avoid_mode"] = False
+                # [장애물 없음] -> 바퀴 정렬 로직 추가
+                
+                # 1. 일단 목표는 중앙
+                _can["target_steer"] = CENTER
                 _can["emergency"] = False
                 _can["left_blinker"] = False
                 _can["right_blinker"] = False
-                # target_steer는 굳이 초기화 안 해도 avoid_mode가 False면 무시됨
+
+                # 2. 바퀴가 아직 중앙이 아니면? -> AI가 잡고 정렬시킴
+                if abs(current_steer - CENTER) > 3:
+                    _can["avoid_mode"] = True  # 바퀴가 돌아올 때까지 제어권 유지
+                    _can["is_steering"] = True
+                else:
+                    # 3. 바퀴가 중앙에 왔으면 -> 제어권 해제
+                    _can["avoid_mode"] = False
+                    # (여기서 avoid_mode를 끄면 수동 조작이나 GO 직진 상태 유지)
 
         time.sleep(0.1)
 # =========================================================
@@ -498,6 +530,49 @@ def ai_data_worker():
 
 
 
+# =========================================================
+# [NEW] 터미널 명령어 입력 워커
+# =========================================================
+def console_input_worker():
+    """터미널에서 GO 입력을 기다리는 스레드"""
+    print("\n[CMD] Type 'GO' to start moving straight!")
+    print("[CMD] Type 'STOP' to brake manually.\n")
+    
+    while not _stop:
+        try:
+            # input()은 블로킹 함수이므로 별도 스레드에서 실행
+            cmd = input().strip().upper()
+            
+            if cmd == "GO":
+                print(">>> [COMMAND] GO RECEIVED! Starting Car...")
+                with _lock:
+                    # 1. 바퀴 정렬
+                    _can["steer"] = STEER_CENTER
+                    _can["target_steer"] = STEER_CENTER
+                    _can["is_steering"] = False
+                    _can["avoid_mode"] = False
+                    
+                    # 2. 직진 출발 (브레이크 해제, 가속 활성화)
+                    _can["is_braking"] = False
+                    _can["is_accelerating"] = True
+                    _can["is_resverse"] = False
+                    
+                    # 3. 초기 속도 부여 (즉시 출발을 위해)
+                    if _can["speed_kmh"] < 10:
+                        _can["speed_kmh"] = 15  # 초기 속도 15km/h
+
+            elif cmd == "STOP":
+                print(">>> [COMMAND] STOP RECEIVED!")
+                with _lock:
+                    _can["is_accelerating"] = False
+                    _can["is_braking"] = True
+                    _can["speed_kmh"] = 0
+            
+        except EOFError:
+            break
+        except Exception as e:
+            print(f"[CMD Error] {e}")
+
 def main():
     global _stop
     print("Starting System...")
@@ -506,15 +581,11 @@ def main():
     t_ai = threading.Thread(target=ai_data_worker, daemon=True, name="AI_Worker")
     t_ai.start()
     
-    # # 블루투스 송신 스레드
-    # t = threading.Thread(target=bt_car, daemon=True)
-    # t.start()
-    
-    # 🚗 속도 제어 스레드 
+    # 속도 제어 스레드 
     t_speed = threading.Thread(target=speed_controller, daemon=True, name="speed_controller")
     t_speed.start()
     
-    # [추가] 장애물 회피 제어 스레드 활성화
+    # 장애물 회피 제어 스레드
     t_avoid = threading.Thread(target=emergency_control_logic, daemon=True, name="Avoid_Logic")
     t_avoid.start()
 
@@ -526,22 +597,21 @@ def main():
     t_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
     t_wheel.start()
 
+    # [NEW] 콘솔 입력 스레드 추가
+    t_input = threading.Thread(target=console_input_worker, daemon=True, name="Console_Input")
+    t_input.start()
+
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
-        global _stop
         _stop = True
-
-        t.join(timeout=1.0)
-        t_ai.join(timeout=1.0)
-        t_speed.join(timeout=1.0)
-        t_emer.join(timeout =1.0)
-        t_wheel.join(timeout=1.0)
-
+        # t.join() 등은 daemon=True라 필수는 아니지만 안전 종료를 위해 대기 가능
+        time.sleep(1)
         print("Shutdown complete.")
         if sndfile: sndfile.close() 
+
 if __name__ == "__main__":
     main()
