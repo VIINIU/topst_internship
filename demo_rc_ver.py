@@ -586,7 +586,7 @@ def auto_align_worker():
 # 3. [유지] 터미널 명령어 입력 워커 (수정 없음)
 # =========================================================
 def console_input_worker():
-    """터미널에서 GO 입력을 기다리는 스레드"""
+    """터미널에서 GO 입력을 기다리는 스레드 (플래그 제어만 담당)"""
     print("\n[CMD] Type 'GO' to start moving straight!")
     print("[CMD] Type 'STOP' to brake manually.\n")
     
@@ -595,26 +595,32 @@ def console_input_worker():
             cmd = input().strip().upper()
             
             if cmd == "GO":
-                print(">>> [COMMAND] GO RECEIVED! Starting Car...")
+                print(">>> [COMMAND] GO RECEIVED! Accelerating to Cruise Speed...")
                 with _lock:
+                    # 1. 제어 플래그 설정 (직접 값 주입 X, 플래그만 ON)
                     _can["is_braking"] = False
                     _can["avoid_mode"] = False
                     _can["emergency"] = False
+                    
+                    # 2. 바퀴 정렬
                     _can["steer"] = 65
-                    _can["target_steer"] = 65
+                    _can["target_steer"] = 65 # (비상용이지만 초기화 차원)
                     _can["is_steering"] = False
-                    send_ipc_signal(VCP_IO.WHEEL, 65)
+                    
+                    # 3. 가속 시작 신호
                     _can["is_accelerating"] = True
                     _can["is_resverse"] = False
-                    _can["speed_kmh"] = 5
                     
+                    # 초기 기동을 위해 0이면 살짝 쳐줌 (옵션)
+                    if _can["speed_kmh"] == 0:
+                        _can["speed_kmh"] = 5
+
             elif cmd == "STOP":
                 print(">>> [COMMAND] STOP RECEIVED!")
                 with _lock:
                     _can["is_accelerating"] = False
                     _can["is_braking"] = True
-                    _can["speed_kmh"] = 0
-                    send_ipc_signal(VCP_IO.MOTOR_A, 0)
+                    # 속도 0 설정은 speed_controller가 다음 루프에서 수행함
             
         except EOFError:
             break
