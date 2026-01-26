@@ -260,23 +260,29 @@ def speed_controller():
             is_brake = _can.get("is_braking", False)
             steer = _can.get("steer", STEER_CENTER)
         
-        # [수정] 오버스티어 방지 로직 + 디버깅
+        # [수정 1] new_speed 초기화 (가속/감속 조건에 걸리지 않을 경우를 대비)
+        new_speed = current_speed
+
+        # [수정 2] 오버스티어 방지 로직 + 디버깅
         if 50 < steer < 80: 
             # 안전 범위: 기존 is_brake 상태 유지
             pass
         else:
             # 위험 범위: 강제 감속
-            if not is_brake: # 브레이크가 새로 걸리는 시점에만 로그 출력
+            if not is_brake: 
                 print(f"[WARN] Unsafe Steering Detected! Angle: {steer} -> Braking!")
             is_brake = True
 
+        # [수정 3] 가속/감속 계산
         if is_accel and not is_brake:
             # 가속
             step = SPEED_INCREMENT
             if not is_resverse:
+                # 전진 가속
                 new_speed = min(current_speed + step, MAX_SPEED)
             else:
-                new_speed = min(current_speed - step, MAX_SPEED) # 후진 가속 로직 점검 필요하면 수정
+                # 후진 가속 (음수 방향)
+                new_speed = max(current_speed - step, -MAX_SPEED) 
             
             with _lock:
                 _can["speed_kmh"] = new_speed
@@ -292,12 +298,17 @@ def speed_controller():
 
             with _lock:
                 _can["speed_kmh"] = new_speed
+        
+        # else: 아무 입력도 없으면 new_speed는 위에서 초기화한 current_speed 유지
 
+        # 값 전송
         send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
         
         # 속도가 0이 아닐 때만 로그 출력 (로그 폭주 방지)
-        if new_speed != 0:
-            print(f"[ACCEL] Speed: {new_speed}")
+        if new_speed != 0 and is_accel: 
+             # is_accel 체크를 넣어서 가속중일때만 로그 찍게 하여 터미널 정리
+             # 필요하면 print(f"[ACCEL] Speed: {new_speed}") 로 원복 가능
+             pass 
             
         time.sleep(ACCEL_INTERVAL)
 
