@@ -60,7 +60,7 @@ class ObjectAnalytics:
         self.total_area = width * height
         self.close_area_ratio = 0.15
         
-        # [수정] 장애물 미감지 시 플래그 해제 대기 시간 (0.5 -> 1.0초로 변경)
+        # [수정] 장애물 미감지 시 플래그 해제 대기 시간 (0.5초로 변경)
         self.timeout = 0.5  
         
         self.zones = {'L': ClearCheck(), 'F': ClearCheck(), 'R': ClearCheck()}
