@@ -341,9 +341,6 @@ def emergency_worker():
 
         # 1순위: 비상등 (둘 다 깜빡임)
         if emer:
-            # BLINK_INTERVAL 기반으로 ON/OFF 결정
-            on = get_blink_state()
-            action = VCP_IO.ACTION_ON if on else VCP_IO.ACTION_OFF
             # 좌우 모두 같은 상태로 깜빡이기
             send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_LEFT)
             send_ipc_signal(VCP_IO.TURN_SIGNAL, action, VCP_IO.SUB_RIGHT)
@@ -381,10 +378,10 @@ def emergency_control_logic():
     print("[Emergency Logic] Started.")
 
     # 하드웨어 세팅
-    HARD_LEFT = 127   
-    HARD_RIGHT = 0    
-    SOFT_LEFT = 95    
-    SOFT_RIGHT = 35   
+    HARD_LEFT = 0 #0이 제일 왼쪽 127이 제일 오른쪽 각도 
+    HARD_RIGHT = 127    
+    SOFT_LEFT = 35    
+    SOFT_RIGHT = 95   
     CENTER = 65
 
     while not _stop:
@@ -441,10 +438,10 @@ def emergency_control_logic():
                 _can["emergency"] = False
                 
                 # 깜빡이
-                if target_angle > CENTER: 
+                if target_angle < CENTER: # 왼쪽 
                     _can["left_blinker"] = True
                     _can["right_blinker"] = False
-                elif target_angle < CENTER: 
+                elif target_angle > CENTER: # 오른쪽
                     _can["left_blinker"] = False
                     _can["right_blinker"] = True
             
@@ -458,7 +455,7 @@ def emergency_control_logic():
                 _can["right_blinker"] = False
 
                 # 2. 바퀴가 아직 중앙이 아니면? -> AI가 잡고 정렬시킴
-                if abs(current_steer - CENTER) > 3:
+                if abs(current_steer - CENTER) > 5: #jiteer
                     _can["avoid_mode"] = True  # 바퀴가 돌아올 때까지 제어권 유지
                     _can["is_steering"] = True
                 else:
