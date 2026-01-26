@@ -53,12 +53,6 @@ class ClearCheck:
         self.is_close = False
         self.last_update_time = 0.0
 
-class ClearCheck:
-    def __init__(self):
-        self.has_obstacle = False
-        self.is_close = False
-        self.last_update_time = 0.0
-
 class ObjectAnalytics:
     def __init__(self, width=800, height=480):
         self.w = width
@@ -66,7 +60,7 @@ class ObjectAnalytics:
         self.total_area = width * height
         self.close_area_ratio = 0.15
         
-        # [수정] 장애물 미감지 시 플래그 해제 대기 시간 (0.5 -> 1.0초로 변경)
+        # [수정] 장애물 미감지 시 플래그 해제 대기 시간 (0.5초로 변경)
         self.timeout = 0.5  
         
         self.zones = {'L': ClearCheck(), 'F': ClearCheck(), 'R': ClearCheck()}

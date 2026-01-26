@@ -28,7 +28,8 @@
 /*                             Include Files                                  */
 /* ========================================================================== */
 #include "NnAppMain.h"
-
+#include <time.h> // 디버깅용
+#include <stdio.h> // 디버깅용
 
 /* ========================================================================== */
 /*                           Macros & Typedefs                                */
@@ -61,6 +62,7 @@
 #define STABLE_M 5
 #define WIN_N 10
 #define WIN_M 5
+#define DBG_DRAW_RATE
 
 typedef struct
 {
@@ -183,31 +185,6 @@ static char logo[] = {
 /*                          Function Definitions                              */
 /* ========================================================================== */
 
-
-
-
-/*static float iou_box(const Box_t *a, const Box_t *b)
-{
-    int ix1 = (a->xmin > b->xmin) ? a->xmin : b->xmin;
-    int iy1 = (a->ymin > b->ymin) ? a->ymin : b->ymin;
-    int ix2 = (a->xmax < b->xmax) ? a->xmax : b->xmax;
-    int iy2 = (a->ymax < b->ymax) ? a->ymax : b->ymax;
-
-    int iw = ix2 - ix1;
-    int ih = iy2 - iy1;
-    if (iw <= 0 || ih <= 0) return 0.f;
-
-    int inter = iw * ih;
-    int areaA = (a->xmax - a->xmin) * (a->ymax - a->ymin);
-    int areaB = (b->xmax - b->xmin) * (b->ymax - b->ymin);
-
-    int uni = areaA + areaB - inter;
-    if (uni <= 0) return 0.f;
-
-    return (float)inter / (float)uni;
-}*/
-
-
 /* static int first_Detection(int cls, const Box_t *cur, int *out_same)
 {
     int same = 0;
@@ -237,6 +214,12 @@ static void track_update(int cls, float x1, float y1, float x2, float y2)
     g_track[cls].last_box.xmax = (int)(x2 + 0.5f);
     g_track[cls].last_box.ymax = (int)(y2 + 0.5f);
 } */
+
+static inline uint64_t now_ms(void){
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
 
 static int update_det_window(int detected)
 {
@@ -1208,6 +1191,9 @@ static void NnDrawResult(app_context_t *pContext)
     outputMapBase = pContext->memory_context.map_base_output[outputIdx];
     outputWidth = pContext->outputWidth;
     outputHeight = pContext->outputHeight;
+	
+	//디버깅용 -> 해결 (FPS는 프레임당 1번만)
+	float fps = NnGetFPS();
 
     for(netIdx = 0; netIdx < netCnt; netIdx++)
     {
@@ -1251,8 +1237,8 @@ static void NnDrawResult(app_context_t *pContext)
 					Box_t selected[3];
 					int selCount = 0;
 
-					// boxCount <= 3 가정
-					// 역순 탐색: 같은 cls가 여러 개면 "뒤에 있는(최근)" 박스가 선택됨
+				// boxCount <= 3 가정
+				// 역순 탐색: 같은 cls가 여러 개면 "뒤에 있는(최근)" 박스가 선택됨
 				for (int i = boxCount - 1; i >= 0; i--)
 				{
 					int cls = boundingBoxes[i].cls;
@@ -1324,7 +1310,7 @@ static void NnDrawResult(app_context_t *pContext)
     currentYPos += spacing;
     cvDrawInfo(outputMapBase, outputWidth, outputHeight, DRAW_INFO_MEMORY, pContext->perfContext.pPerfInfo.memUsage, 0, baseXPos, currentYPos, fontSize, whiteColor);
 
-    cvDrawInfo(outputMapBase, outputWidth, outputHeight, DRAW_INFO_FPS, NnGetFPS(), 0, 100, 100, fontSize, whiteColor);
+    cvDrawInfo(outputMapBase, outputWidth, outputHeight, DRAW_INFO_FPS, fps, 0, 100, 100, fontSize, whiteColor);
 	}
 }
 
