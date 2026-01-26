@@ -11,7 +11,7 @@ from Library.IPC_Library import parse_hex_data, parse_string_data, parse_channel
 # VCP IO 정의
 class VCP_IO:
     # IO 타입
-    BREAK_LIGHT = 0x101
+    BREAK_LIGHT = 0x101 #
     TURN_SIGNAL = 0x102 #비상등 led (급정지) / 좌, 우회전
     EMER_SIGNAL = 0x103 
     HEAD_LIGHT = 0x104
