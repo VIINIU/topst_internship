@@ -53,12 +53,6 @@ class ClearCheck:
         self.is_close = False
         self.last_update_time = 0.0
 
-class ClearCheck:
-    def __init__(self):
-        self.has_obstacle = False
-        self.is_close = False
-        self.last_update_time = 0.0
-
 class ObjectAnalytics:
     def __init__(self, width=800, height=480):
         self.w = width
