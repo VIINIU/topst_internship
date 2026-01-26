@@ -43,6 +43,8 @@ _zone_state = {
 }
 
 
+_ipc_cache = {}
+
 # [Class] 구역 상태 및 분석 클래스
 class ClearCheck:
     def __init__(self):
@@ -207,7 +209,18 @@ _stop   = False
 # =========================================================
 
 def send_ipc_signal(io_type, action_or_value, subtype=None):
-    """IPC 신호 전송 통합 함수"""
+    """IPC 신호 전송 (값 변경 시에만 전송하여 부하 방지)"""
+    global _ipc_cache
+    
+    if sndfile is None: return False
+    
+    # 캐시 키 생성 (IO타입 + 서브타입)
+    cache_key = (io_type, subtype)
+    
+    # 이전 값과 같으면 전송 스킵 (부하 감소 핵심)
+    if _ipc_cache.get(cache_key) == action_or_value:
+        return True
+
     try:
         if subtype is not None:
             payload = bytes([subtype, action_or_value])
@@ -215,9 +228,15 @@ def send_ipc_signal(io_type, action_or_value, subtype=None):
             payload = (action_or_value).to_bytes(1,'big',signed=True)
         
         IPC_SendPacketWithIPCHeader(sndfile, 1, 0, io_type, payload)
+        
+        # 전송 성공 시 캐시 업데이트
+        _ipc_cache[cache_key] = action_or_value
         return True
     except Exception as e:
-        print(f"[IPC ERROR] {e} - io_type: 0x{io_type:X}, value: {action_or_value}")
+        # 에러 발생 시 캐시 초기화 (재시도 허용)
+        if cache_key in _ipc_cache:
+            del _ipc_cache[cache_key]
+        print(f"[IPC ERROR] {e}")
         return False
 
 def get_blink_state():
@@ -238,41 +257,49 @@ def speed_controller():
             is_accel = _can.get("is_accelerating", False)
             is_resverse = _can.get("is_resverse", False)
             current_speed = _can.get("speed_kmh", 0)
-            is_brake = _can.get("is_braking",False)
+            is_brake = _can.get("is_braking", False)
             steer = _can.get("steer", STEER_CENTER)
         
-        if 50 < steer < 80: # 오버스티어, 전복 방지
-            is_brake = True
-        else :
+        # [수정] 오버스티어 방지 로직 + 디버깅
+        if 50 < steer < 80: 
+            # 안전 범위: 기존 is_brake 상태 유지
             pass
+        else:
+            # 위험 범위: 강제 감속
+            if not is_brake: # 브레이크가 새로 걸리는 시점에만 로그 출력
+                print(f"[WARN] Unsafe Steering Detected! Angle: {steer} -> Braking!")
+            is_brake = True
 
         if is_accel and not is_brake:
-            # 가속 / 뒷방향 가속
+            # 가속
+            step = SPEED_INCREMENT
             if not is_resverse:
-                new_speed = min(current_speed + SPEED_INCREMENT, MAX_SPEED)
-                with _lock:
-                    _can["speed_kmh"] = new_speed
-
+                new_speed = min(current_speed + step, MAX_SPEED)
             else:
-                new_speed = min(current_speed - SPEED_INCREMENT, MAX_SPEED)
-                with _lock:
-                    _can["speed_kmh"] = new_speed
+                new_speed = min(current_speed - step, MAX_SPEED) # 후진 가속 로직 점검 필요하면 수정
+            
+            with _lock:
+                _can["speed_kmh"] = new_speed
 
         elif is_brake:
             # 감속
-            if current_speed > 0 : # 전진 상황
-                new_speed = max(current_speed - SPEED_DECREMENT, 0) # 후진 방지
-            
-            else : # 후진 상황
+            if current_speed > 0: # 전진 중 감속
+                new_speed = max(current_speed - SPEED_DECREMENT, 0)
+            elif current_speed < 0: # 후진 중 감속
                 new_speed = min(current_speed + SPEED_DECREMENT, 0)
+            else:
+                new_speed = 0
 
             with _lock:
                 _can["speed_kmh"] = new_speed
 
         send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
-        print(f"[ACCEL] Speed: {new_speed}")
+        
+        # 속도가 0이 아닐 때만 로그 출력 (로그 폭주 방지)
+        if new_speed != 0:
+            print(f"[ACCEL] Speed: {new_speed}")
+            
         time.sleep(ACCEL_INTERVAL)
-
 
 def wheel_controller():
     """
@@ -383,8 +410,8 @@ def emergency_control_logic():
     # 하드웨어 세팅
     HARD_LEFT = 127   
     HARD_RIGHT = 0    
-    SOFT_LEFT = 95    
-    SOFT_RIGHT = 35   
+    SOFT_LEFT = 90    
+    SOFT_RIGHT = 30   
     CENTER = 65
 
     while not _stop:
@@ -540,33 +567,36 @@ def console_input_worker():
     
     while not _stop:
         try:
-            # input()은 블로킹 함수이므로 별도 스레드에서 실행
             cmd = input().strip().upper()
             
             if cmd == "GO":
                 print(">>> [COMMAND] GO RECEIVED! Starting Car...")
                 with _lock:
-                    # 1. 바퀴 정렬
+                    # 1. 모든 상태 강제 초기화
+                    _can["is_braking"] = False
+                    _can["avoid_mode"] = False
+                    _can["emergency"] = False
+                    
+                    # 2. 바퀴 강제 중앙 정렬 (변수 및 하드웨어 동시 적용)
                     _can["steer"] = STEER_CENTER
                     _can["target_steer"] = STEER_CENTER
                     _can["is_steering"] = False
-                    _can["avoid_mode"] = False
+                    send_ipc_signal(VCP_IO.WHEEL, STEER_CENTER) # 즉시 전송
                     
-                    # 2. 직진 출발 (브레이크 해제, 가속 활성화)
-                    _can["is_braking"] = False
+                    # 3. 직진 가속 활성화
                     _can["is_accelerating"] = True
                     _can["is_resverse"] = False
                     
-                    # 3. 초기 속도 부여 (즉시 출발을 위해)
-                    if _can["speed_kmh"] < 10:
-                        _can["speed_kmh"] = 15  # 초기 속도 15km/h
-
+                    # 4. 초기 속도 부여
+                    _can["speed_kmh"] = 15
+                    
             elif cmd == "STOP":
                 print(">>> [COMMAND] STOP RECEIVED!")
                 with _lock:
                     _can["is_accelerating"] = False
                     _can["is_braking"] = True
                     _can["speed_kmh"] = 0
+                    send_ipc_signal(VCP_IO.MOTOR_A, 0) # 즉시 정지 신호
             
         except EOFError:
             break
