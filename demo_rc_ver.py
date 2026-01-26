@@ -416,17 +416,11 @@ def emergency_control_logic():
     print("[Emergency Logic] Started.")
 
     # 하드웨어 세팅
-<<<<<<< HEAD
     HARD_LEFT = 0 #0이 제일 왼쪽 127이 제일 오른쪽 각도 
     HARD_RIGHT = 127    
     SOFT_LEFT = 35    
     SOFT_RIGHT = 95   
-=======
-    HARD_LEFT = 127   
-    HARD_RIGHT = 0    
-    SOFT_LEFT = 90    
-    SOFT_RIGHT = 30   
->>>>>>> 3b496933e4344fcadcb03d94df8564da3cce3cb9
+
     CENTER = 65
 
     while not _stop:
