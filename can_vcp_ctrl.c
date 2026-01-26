@@ -170,7 +170,7 @@ void HeadLED_ON(void)
 	GPIO_Set(HeadLEDPIN, 1);
 }
 
-void HeadLED_OFF(vo id)
+void HeadLED_OFF(void)
 {
 	GPIO_Set(HeadLEDPIN, 0);
 }
