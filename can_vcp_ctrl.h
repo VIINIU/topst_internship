@@ -23,6 +23,9 @@
 #define IN3   GPIO_GPA(20)
 #define IN4   GPIO_GPA(19)
 
+#define BreakServo_SEL 7 //브레이크용 서보 추가
+#define BreakServo_PORT GPIO_PERICH_CH0
+
 #define ENA_SEL      0
 #define ENA_PORT    GPIO_PERICH_CH0
 #define ENB_SEL      4
@@ -72,7 +75,7 @@ enum VCP_IO_SUBTYPE {
 **************************************************************************************************/
 void ControlBreadBoardSensors(uint32 mId, uint8 nDataLength, sint8* pucData);
 boolean InitSensorControls(void);
-
+void ConfigureServoPWM(uint32 channel, uint32 port, uint32 angle_deg);
 
 #endif  // ( MCU_BSP_CAN_VCP_CTRL_HEADER == 1 )
 

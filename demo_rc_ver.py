@@ -288,7 +288,7 @@ def speed_controller():
 
         # 가속/감속 계산
         if is_accel and not is_brake:
-            send_ipc_signal(VCP_IO.BREAK_LIGHT, 10) # 브레이크용 서보모터 원위치(가속)
+            send_ipc_signal(VCP_IO.BREAK_LIGHT, VCP_IO.ACTION_OFF) # 브레이크용 서보모터 원위치(가속)
             step = SPEED_INCREMENT
             if not is_resverse:
                 new_speed = min(current_speed + step, MAX_SPEED)
@@ -299,7 +299,7 @@ def speed_controller():
                 _can["speed_kmh"] = new_speed
 
         elif is_brake:
-            send_ipc_signal(VCP_IO.BREAK_LIGHT, 100) # 브레이크용 서보모터 동작(감속)
+            send_ipc_signal(VCP_IO.BREAK_LIGHT, VCP_IO.ACTION_ON) # 브레이크용 서보모터 동작(감속)
             if current_speed > 0: 
                 new_speed = max(current_speed - SPEED_DECREMENT, 0)
             elif current_speed < 0: 
@@ -311,7 +311,7 @@ def speed_controller():
                 _can["speed_kmh"] = new_speed
         
         else: #가속도 감속도 아닌 상황 -> 브레이크 서보모터 원위치
-            send_ipc_signal(VCP_IO.BREAK_LIGHT, 10)
+            send_ipc_signal(VCP_IO.BREAK_LIGHT, VCP_IO.ACTION_OFF)
 
         # 최종 모터 신호 관련
         send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
