@@ -198,7 +198,8 @@ _can = {"park": False,
         "is_steering": False,
         "is_steer_reverse": False,
         "avoid_mode": False,
-        "target_steer" : 65
+        "target_steer" : 65,
+        "lane_num" : 2 #현재 주행 차선 정보(기본값 2차선)
         } #[소연] 장애물 회피 플래그  
 
 _lock   = threading.Lock()
@@ -421,36 +422,52 @@ def emergency_control_logic():
             l_has, l_close = _zone_state["L"]
             f_has, f_close = _zone_state["F"]
             r_has, r_close = _zone_state["R"]
+            lane_num = _can.get("lane_num", 2) 
+            current_steer = _can.get("steer", CENTER)
 
         # 제어 변수 초기화
         target_angle = CENTER
         avoid_active = False
         do_emergency_stop = False
         
-        # 1. 전방위 차단 -> 정지
+        # ----------------------------------------
+        # 1. 정지 판단 (차선에 따른 물리적 고립 체크)
+        # ----------------------------------------
         if f_has and l_has and r_has:
             do_emergency_stop = True
+        elif lane_num == 1 and f_has and r_has: # 1차선 고립 상황
+            do_emergency_stop = True
+        elif lane_num == 3 and f_has and l_has: # 3차선 고립 상황
+            do_emergency_stop = True
 
-        # 2. 전방은 뚫림 -> 직진 (회피 모드 해제 로직으로 이동)
+        # ----------------------------------------
+        # 2. 회피 방향 및 강도 판단 (차선 제약 + 거리 반영)
+        # ----------------------------------------
         elif not f_has:
             avoid_active = False
-
-        # 3. 근접 장애물 -> 급커브
-        elif f_close or l_close or r_close:
+        
+        elif f_has or l_has or r_has: # 장애물 감지 시
             avoid_active = True
-            if l_has: 
-                target_angle = HARD_RIGHT
-            else:
-                target_angle = HARD_LEFT
+            
+            # [긴급도 체크] 하나라도 근접해 있으면 HARD, 아니면 SOFT
+            is_emergency = (f_close or l_close or r_close)
 
-        # 4. 원거리 장애물 -> 완만 회피
-        elif f_has:
-            avoid_active = True
-            if l_has:
-                target_angle = SOFT_RIGHT
+            if lane_num == 1:
+                # 1차선: 왼쪽 불가 -> 무조건 우측 회피
+                target_angle = HARD_RIGHT if is_emergency else SOFT_RIGHT
+                
+            elif lane_num == 3:
+                # 3차선: 오른쪽 불가 -> 무조건 좌측 회피
+                target_angle = HARD_LEFT if is_emergency else SOFT_LEFT
+                
             else:
-                target_angle = SOFT_LEFT
-
+                # 2차선: 기본 왼쪽 회피 (왼쪽에 장애물 l_has가 없을 때만)
+                if l_has: 
+                    # 왼쪽에 뭐가 있으면 오른쪽으로 회피
+                    target_angle = HARD_RIGHT if is_emergency else SOFT_RIGHT
+                else:
+                    # 왼쪽이 비어있으면 기본 구조대로 왼쪽으로 회피
+                    target_angle = HARD_LEFT if is_emergency else SOFT_LEFT
         # ----------------------------------------
         # 상태 업데이트 (제어 명령)
         # ----------------------------------------
