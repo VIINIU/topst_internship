@@ -259,39 +259,43 @@ def speed_controller():
             current_speed = _can.get("speed_kmh", 0)
             is_brake = _can.get("is_braking", False)
             steer = _can.get("steer", STEER_CENTER)
+            is_avoid = _can.get("avoid_mode", False) # 회피 모드 여부 확인
         
-        # [수정 1] new_speed 초기화 (가속/감속 조건에 걸리지 않을 경우를 대비)
+        # new_speed 초기화
         new_speed = current_speed
 
-        # [수정 2] 오버스티어 방지 로직 + 디버깅
-        if 50 < steer < 80: 
-            # 안전 범위: 기존 is_brake 상태 유지
+        # [안전 로직 수정]
+        # 1. 장애물 회피 모드(is_avoid) 중이면? -> AI가 제어 중이므로 브레이크 간섭 금지 (Pass)
+        # 2. 일반 모드인데 핸들이 위험하게 꺾여있으면? -> 전복 방지 브레이크 (Brake)
+        
+        if is_avoid:
+            # AI가 회피 중일 때는 핸들을 0, 10, 127로 꺾어도 브레이크 밟지 않음
             pass
         else:
-            # 위험 범위: 강제 감속
-            if not is_brake: 
-                print(f"[WARN] Unsafe Steering Detected! Angle: {steer} -> Braking!")
-            is_brake = True
+            # 회피 모드가 아닐 때 (수동 or 직진) 안전 범위 체크
+            if 50 < steer < 80: 
+                pass # 안전
+            else:
+                # 위험 각도 -> 브레이크
+                if not is_brake: 
+                    print(f"[WARN] Unsafe Steering Detected! Angle: {steer} -> Braking!")
+                is_brake = True
 
-        # [수정 3] 가속/감속 계산
+        # 가속/감속 계산
         if is_accel and not is_brake:
-            # 가속
             step = SPEED_INCREMENT
             if not is_resverse:
-                # 전진 가속
                 new_speed = min(current_speed + step, MAX_SPEED)
             else:
-                # 후진 가속 (음수 방향)
                 new_speed = max(current_speed - step, -MAX_SPEED) 
             
             with _lock:
                 _can["speed_kmh"] = new_speed
 
         elif is_brake:
-            # 감속
-            if current_speed > 0: # 전진 중 감속
+            if current_speed > 0: 
                 new_speed = max(current_speed - SPEED_DECREMENT, 0)
-            elif current_speed < 0: # 후진 중 감속
+            elif current_speed < 0: 
                 new_speed = min(current_speed + SPEED_DECREMENT, 0)
             else:
                 new_speed = 0
@@ -299,17 +303,7 @@ def speed_controller():
             with _lock:
                 _can["speed_kmh"] = new_speed
         
-        # else: 아무 입력도 없으면 new_speed는 위에서 초기화한 current_speed 유지
-
-        # 값 전송
         send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
-        
-        # 속도가 0이 아닐 때만 로그 출력 (로그 폭주 방지)
-        if new_speed != 0 and is_accel: 
-             # is_accel 체크를 넣어서 가속중일때만 로그 찍게 하여 터미널 정리
-             # 필요하면 print(f"[ACCEL] Speed: {new_speed}") 로 원복 가능
-             pass 
-            
         time.sleep(ACCEL_INTERVAL)
 
 def wheel_controller():
@@ -558,8 +552,8 @@ def ai_data_worker():
 # =========================================================
 def auto_align_worker():
     """
-    장애물 회피 모드(avoid_mode)가 True였다가 False로 바뀌는 순간을 감지하여,
-    바퀴를 중앙(CENTER)으로 한 번 정렬해주는 역할을 수행
+    장애물 회피 모드(avoid_mode)가 해제되는 순간을 감지하여,
+    논리적/물리적 바퀴를 즉시 중앙으로 정렬시킴 (브레이크 해제 유도)
     """
     print("[Align Worker] Started monitoring avoidance state.")
     
@@ -570,23 +564,23 @@ def auto_align_worker():
         with _lock:
             is_avoid = _can.get("avoid_mode", False)
         
-        # [감지] 회피 모드가 켜져있다가(True) -> 꺼짐(False)으로 바뀌는 순간 (Falling Edge)
+        # [감지] 회피 모드가 켜져있다가(True) -> 꺼짐(False)으로 바뀌는 순간
         if was_avoiding and not is_avoid:
-            print("[Align Worker] Avoidance finished. Re-centering wheels.")
+            print("[Align Worker] Avoidance finished. Force centering wheels.")
             
             with _lock:
-                # 1. 중앙 정렬 값 설정
+                # 1. [핵심] 논리적 변수를 즉시 중앙으로 설정
+                # 이렇게 해야 speed_controller가 "안전 범위"로 인식하고 브레이크를 풂
                 _can["steer"] = CENTER
-                _can["target_steer"] = CENTER
-                # 2. 평시 주행을 위해 필요하다면 is_steering 등의 플래그 처리
-                # (GO 모드 등 다른 로직이 있다면 여기서 제어권 넘김)
+                
+                # 필요하다면 target_steer도 초기화 (필수는 아님)
+                _can["target_steer"] = CENTER 
             
-            # 3. 하드웨어로 즉시 전송
+            # 2. 물리적 하드웨어로 중앙 정렬 명령 전송
             send_ipc_signal(VCP_IO.WHEEL, CENTER)
             
-        # 상태 업데이트
         was_avoiding = is_avoid
-        time.sleep(0.05) # 빠른 반응을 위해 짧은 대기
+        time.sleep(0.05)
 
 # =========================================================
 # 3. [유지] 터미널 명령어 입력 워커 (수정 없음)
@@ -612,7 +606,7 @@ def console_input_worker():
                     send_ipc_signal(VCP_IO.WHEEL, 65)
                     _can["is_accelerating"] = True
                     _can["is_resverse"] = False
-                    _can["speed_kmh"] = 15
+                    _can["speed_kmh"] = 5
                     
             elif cmd == "STOP":
                 print(">>> [COMMAND] STOP RECEIVED!")
