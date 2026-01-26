@@ -12,7 +12,7 @@ from Library.IPC_Library import parse_hex_data, parse_string_data, parse_channel
 # VCP IO 정의
 class VCP_IO:
     # IO 타입
-    BREAK_LIGHT = 0x101 #
+    BREAK_LIGHT = 0x101 # 브레이크 led -> 브레이크용 서보모터로
     TURN_SIGNAL = 0x102 #비상등 led (급정지) / 좌, 우회전
     EMER_SIGNAL = 0x103 
     HEAD_LIGHT = 0x104
@@ -253,7 +253,10 @@ def wheel_action(cur):
     send_ipc_signal(VCP_IO.WHEEL, wheel)
 
 def speed_controller():
-    """F를 누르고 있으면 속도 증가, B를 누르고 있으면 속도 감소"""
+
+    BRAKE_ENGAGED = 100   # 브레이크 작동 시 (각도는 테스트 후 조정)
+    BRAKE_RELEASED = 10   # 평상시 (해제 상태)
+
     while not _stop:
         with _lock:
             is_accel = _can.get("is_accelerating", False)
@@ -285,6 +288,7 @@ def speed_controller():
 
         # 가속/감속 계산
         if is_accel and not is_brake:
+            send_ipc_signal(VCP_IO.BREAK_LIGHT, 10) # 브레이크용 서보모터 원위치(가속)
             step = SPEED_INCREMENT
             if not is_resverse:
                 new_speed = min(current_speed + step, MAX_SPEED)
@@ -295,6 +299,7 @@ def speed_controller():
                 _can["speed_kmh"] = new_speed
 
         elif is_brake:
+            send_ipc_signal(VCP_IO.BREAK_LIGHT, 100) # 브레이크용 서보모터 동작(감속)
             if current_speed > 0: 
                 new_speed = max(current_speed - SPEED_DECREMENT, 0)
             elif current_speed < 0: 
@@ -305,6 +310,10 @@ def speed_controller():
             with _lock:
                 _can["speed_kmh"] = new_speed
         
+        else: #가속도 감속도 아닌 상황 -> 브레이크 서보모터 원위치
+            send_ipc_signal(VCP_IO.BREAK_LIGHT, 10)
+
+        # 최종 모터 신호 관련
         send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
         time.sleep(ACCEL_INTERVAL)
 
