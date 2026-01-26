@@ -416,11 +416,10 @@ def emergency_control_logic():
     print("[Emergency Logic] Started.")
 
     # 하드웨어 세팅
-    HARD_LEFT = 0 #0이 제일 왼쪽 127이 제일 오른쪽 각도 
-    HARD_RIGHT = 127    
-    SOFT_LEFT = 35    
-    SOFT_RIGHT = 95   
-
+    HARD_LEFT = 10 
+    HARD_RIGHT = 120   
+    SOFT_LEFT = 40  
+    SOFT_RIGHT = 90  
     CENTER = 65
 
     while not _stop:
@@ -428,7 +427,6 @@ def emergency_control_logic():
             l_has, l_close = _zone_state["L"]
             f_has, f_close = _zone_state["F"]
             r_has, r_close = _zone_state["R"]
-            current_steer = _can.get("steer", CENTER) # 현재 바퀴 각도 확인
 
         # 제어 변수 초기화
         target_angle = CENTER
@@ -486,21 +484,11 @@ def emergency_control_logic():
             
             else:
                 # [장애물 없음] -> 바퀴 정렬 로직 추가
-                
-                # 1. 일단 목표는 중앙
-                _can["target_steer"] = CENTER
+                _can["avoid_mode"] = False 
                 _can["emergency"] = False
                 _can["left_blinker"] = False
                 _can["right_blinker"] = False
-
-                # 2. 바퀴가 아직 중앙이 아니면? -> AI가 잡고 정렬시킴
-                if abs(current_steer - CENTER) > 5: #jiteer
-                    _can["avoid_mode"] = True  # 바퀴가 돌아올 때까지 제어권 유지
-                    _can["is_steering"] = True
-                else:
-                    # 3. 바퀴가 중앙에 왔으면 -> 제어권 해제
-                    _can["avoid_mode"] = False
-                    # (여기서 avoid_mode를 끄면 수동 조작이나 GO 직진 상태 유지)
+                # target_steer를 여기서 건드리지 않아, 평시 주행 로직과 충돌 방지
 
         time.sleep(0.1)
 # =========================================================
@@ -565,9 +553,43 @@ def ai_data_worker():
                 except: pass
 
 
+# =========================================================
+# 2. [추가] 바퀴 자동 정렬 워커 (Console Worker 역할 보조)
+# =========================================================
+def auto_align_worker():
+    """
+    장애물 회피 모드(avoid_mode)가 True였다가 False로 바뀌는 순간을 감지하여,
+    바퀴를 중앙(CENTER)으로 한 번 정렬해주는 역할을 수행
+    """
+    print("[Align Worker] Started monitoring avoidance state.")
+    
+    was_avoiding = False
+    CENTER = 65
+
+    while not _stop:
+        with _lock:
+            is_avoid = _can.get("avoid_mode", False)
+        
+        # [감지] 회피 모드가 켜져있다가(True) -> 꺼짐(False)으로 바뀌는 순간 (Falling Edge)
+        if was_avoiding and not is_avoid:
+            print("[Align Worker] Avoidance finished. Re-centering wheels.")
+            
+            with _lock:
+                # 1. 중앙 정렬 값 설정
+                _can["steer"] = CENTER
+                _can["target_steer"] = CENTER
+                # 2. 평시 주행을 위해 필요하다면 is_steering 등의 플래그 처리
+                # (GO 모드 등 다른 로직이 있다면 여기서 제어권 넘김)
+            
+            # 3. 하드웨어로 즉시 전송
+            send_ipc_signal(VCP_IO.WHEEL, CENTER)
+            
+        # 상태 업데이트
+        was_avoiding = is_avoid
+        time.sleep(0.05) # 빠른 반응을 위해 짧은 대기
 
 # =========================================================
-# [NEW] 터미널 명령어 입력 워커
+# 3. [유지] 터미널 명령어 입력 워커 (수정 없음)
 # =========================================================
 def console_input_worker():
     """터미널에서 GO 입력을 기다리는 스레드"""
@@ -581,22 +603,15 @@ def console_input_worker():
             if cmd == "GO":
                 print(">>> [COMMAND] GO RECEIVED! Starting Car...")
                 with _lock:
-                    # 1. 모든 상태 강제 초기화
                     _can["is_braking"] = False
                     _can["avoid_mode"] = False
                     _can["emergency"] = False
-                    
-                    # 2. 바퀴 강제 중앙 정렬 (변수 및 하드웨어 동시 적용)
-                    _can["steer"] = STEER_CENTER
-                    _can["target_steer"] = STEER_CENTER
+                    _can["steer"] = 65
+                    _can["target_steer"] = 65
                     _can["is_steering"] = False
-                    send_ipc_signal(VCP_IO.WHEEL, STEER_CENTER) # 즉시 전송
-                    
-                    # 3. 직진 가속 활성화
+                    send_ipc_signal(VCP_IO.WHEEL, 65)
                     _can["is_accelerating"] = True
                     _can["is_resverse"] = False
-                    
-                    # 4. 초기 속도 부여
                     _can["speed_kmh"] = 15
                     
             elif cmd == "STOP":
@@ -605,7 +620,7 @@ def console_input_worker():
                     _can["is_accelerating"] = False
                     _can["is_braking"] = True
                     _can["speed_kmh"] = 0
-                    send_ipc_signal(VCP_IO.MOTOR_A, 0) # 즉시 정지 신호
+                    send_ipc_signal(VCP_IO.MOTOR_A, 0)
             
         except EOFError:
             break
@@ -636,7 +651,11 @@ def main():
     t_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
     t_wheel.start()
 
-    # [NEW] 콘솔 입력 스레드 추가
+    # [NEW] 바퀴 자동 정렬 워커 추가
+    t_align = threading.Thread(target=auto_align_worker, daemon=True, name="Auto_Align")
+    t_align.start()
+
+    # 콘솔 입력 워커
     t_input = threading.Thread(target=console_input_worker, daemon=True, name="Console_Input")
     t_input.start()
 
