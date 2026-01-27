@@ -79,5 +79,3 @@ void ConfigureServoPWM(uint32 channel, uint32 port, uint32 angle_deg);
 
 #endif  // ( MCU_BSP_CAN_VCP_CTRL_HEADER == 1 )
 
-#endif  // MCU_BSP_CAN_DEMO_HEADER
-

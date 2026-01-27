@@ -81,7 +81,7 @@ class ObjectAnalytics:
         self.frame_count += 1
 
         # 5번째 프레임이 아니면 이전에 저장된 결과를 바로 반환 (연산 건너뜀)
-        if self.frame_count % 30 != 0:
+        if self.frame_count % 3 != 0:
             return self.last_result
 
         # === 아래부터는 5프레임마다 실행되는 실제 로직 ===
@@ -129,16 +129,24 @@ class ObjectAnalytics:
         # [타임아웃 처리] 
         # 마지막 감지 시간으로부터 1.0초(self.timeout)가 지날 때까지는 False로 바꾸지 않음
         for key in self.zones:
-            if current_time - self.zones[key].last_update_time > self.timeout:
+            time_diff = current_time - self.zones[key].last_update_time
+            if time_diff > self.timeout:
+                if self.zones[key].has_obstacle: # 꺼지는 순간에만 로그 출력
+                    print(f"[AI-Timeout] Zone {key} cleared. (Last update: {time_diff:.1f}s ago)")
+                
                 self.zones[key].has_obstacle = False
                 self.zones[key].is_close = False
 
-        # 결과 저장 (다음 4프레임 동안 사용)
+        # 결과 저장
         self.last_result = (
             (self.zones['L'].has_obstacle, self.zones['L'].is_close),
             (self.zones['F'].has_obstacle, self.zones['F'].is_close),
             (self.zones['R'].has_obstacle, self.zones['R'].is_close)
         )
+        
+        # [디버깅 5] 최종 결과 출력 (상태가 True인 경우만 강조해서 보거나 매번 출력)
+        # if any(z[0] for z in self.last_result): 
+        print(f"[AI-Result] L:{self.last_result[0]} F:{self.last_result[1]} R:{self.last_result[2]}")
 
         return self.last_result
 
@@ -151,7 +159,7 @@ class ObjectAnalytics:
 
 sndfile = open("/dev/tcc_ipc_micom", 'wb')
 
-MAX_SPEED = 100        # 최대 속도
+MAX_SPEED = 35        # 최대 속도
 SPEED_INCREMENT = 10     # F 누를 때마다 증가량
 SPEED_DECREMENT = 10     # B 누를 때마다 감소량
 ACCEL_INTERVAL = 0.5    # 가속 업데이트 주기 (초)
@@ -578,7 +586,7 @@ def ai_data_worker():
                     _zone_state["L"] = res_L
                     _zone_state["F"] = res_F
                     _zone_state["R"] = res_R
-        
+
         except Exception as e:
             print(f"[AI] Connection Error: {e}")
             time.sleep(2)

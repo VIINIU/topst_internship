@@ -447,14 +447,14 @@ void ControlBreadBoardSensors(uint32 mId, uint8 nDataLength, sint8* pucData)
 			{
 				// turn on the break light
 				ControlBrakeLight(TRUE);
-                ConfigureServoPWM(7, GPIO_PERICH_CH0, 45); // 브레이크 서보모터 동작
+                ConfigureServoPWM(7, GPIO_PERICH_CH0, 100); // 브레이크 서보모터 동작
                 
 			}
 			else
 			{
 				// turn off the break light
 				ControlBrakeLight(FALSE);
-                ConfigureServoPWM(7, GPIO_PERICH_CH0, 135);
+                ConfigureServoPWM(7, GPIO_PERICH_CH0, 132);
 
 			}
 				
