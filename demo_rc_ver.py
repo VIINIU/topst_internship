@@ -58,7 +58,7 @@ class ObjectAnalytics:
         self.w = width
         self.h = height
         self.total_area = width * height
-        self.close_area_ratio = 0.15
+        self.close_area_ratio = 0.12
         
         # [수정] 장애물 미감지 시 플래그 해제 대기 시간 (0.5초로 변경)
         self.timeout = 0.5  
@@ -107,8 +107,8 @@ class ObjectAnalytics:
                 is_close = (obj_area / self.total_area) > self.close_area_ratio
 
                 # 화면 3분할 기준선
-                div_1 = self.w / 3.0       
-                div_2 = self.w * (2.0 / 3.0) 
+                div_1 = self.w / 2.8      
+                div_2 = self.w * (1.8 / 2.8) 
 
                 # 중심점이 위치한 구역 판단
                 target_zone = ''
