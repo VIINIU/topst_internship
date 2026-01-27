@@ -55,13 +55,13 @@
 #define OUTPUT_RTPM_WIDTH 1280
 #define OUTPUT_RTPM_HEIGHT 720
 #define DEFAULT_TARGET_IP_ADDRESS "192.168.0.8"
-#define WAIT_SERVER_IP   "192.168.0.101" // 서버 IP
+#define WAIT_SERVER_IP   "192.168.0.100" // 서버 IP
 #define WAIT_SERVER_PORT 9999 // 소켓 서버
 #define INTERACTIVE_MODE
 #define MAX_CLASSES 256
 #define STABLE_M 5
 #define WIN_N 10
-#define WIN_M 5
+#define WIN_M 3
 #define DBG_DRAW_RATE
 
 typedef struct
@@ -243,7 +243,7 @@ static int update_det_window(int detected)
         if (g_det_pos >= WIN_N) g_det_pos = 0;
     }
 
-    // 10프레임이 다 찼고, 그 중 5개 이상이면 stable
+    // 10프레임이 다 찼고, 그 중 3개 이상이면 stable (1.27 수정)
     if (g_det_filled && g_det_sum >= WIN_M) return 1;
     return 0;
 }
