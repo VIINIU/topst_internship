@@ -44,6 +44,12 @@ AI_CONFIG = {
     "SELECT_TIMEOUT": 0.2,
 }
 
+# AI-G 카메라 설정
+AI_CAMERA_CONFIG = {
+    "WIDTH": 800,
+    "HEIGHT": 480,
+}
+
 # 카메라 설정
 CAMERA_CONFIG = {
     "WIDTH": 640,
@@ -80,8 +86,7 @@ OBSTACLE_CONFIG = {
     "HARD_LEFT": 10,
     "HARD_RIGHT": 120,
     "SOFT_LEFT": 40,
-    "SOFT_RIGHT": 90,
-    "CENTER": 65,
+    "SOFT_RIGHT": 90
 }
 
 # =========================================================
@@ -91,21 +96,20 @@ OBSTACLE_CONFIG = {
 _zone_state = {"L": (False, False), "F": (False, False), "R": (False, False)}
 _can = {
     "park": False,
+    "lane_num": 2,
+    "avoid_mode": False,
     "left_blinker": False,
     "right_blinker": False,
-    "emergency": False,
     "headlights": False,
     "fuel_l": 0,
     "speed_kmh": 0,
-    "steer": STEER_CONFIG["CENTER"],
     "is_accelerating": False,
     "is_braking": False,
     "is_resverse": False,
     "is_steering": False,
     "is_steer_reverse": False,
-    "avoid_mode": False,
+    "steer": STEER_CONFIG["CENTER"],
     "target_steer": STEER_CONFIG["CENTER"],
-    "lane_num": 2,
 }
 
 _ipc_cache = {}  # IPC 전송 최적화용
@@ -121,9 +125,9 @@ sndfile = open("/dev/tcc_ipc_micom", 'wb')
 # =========================================================
 
 class ObjectAnalytics:
-    """AI에서 받은 객체 정보를 분석하여 장애물 위치 결정"""
+    """AI-G에서 받은 객체 정보를 분석하여 장애물 위치 결정"""
     
-    def __init__(self, width=800, height=480):
+    def __init__(self, width=AI_CAMERA_CONFIG["WIDTH"], height=AI_CAMERA_CONFIG["HEIGHT"]):
         self.w, self.h = width, height
         self.total_area = width * height
         self.close_area_ratio = OBSTACLE_CONFIG["CLOSE_RATIO"]
@@ -498,9 +502,12 @@ def send_ipc_signal(io_type, value, subtype=None):
 # =========================================================
 
 def wheel_controller():
-    """조향 제어 (P-Control + 회피 모드 지원)"""
+    """조향 제어 (P-Control + 회피 모드 통합)"""
     dt = 1.0 / float(STEER_CONFIG["HZ"])
     Kp = STEER_CONFIG["P_GAIN"]
+    step_limit = STEER_CONFIG["STEP"]
+    
+    # 초기값 설정
     current_steer_f = float(STEER_CONFIG["CENTER"])
 
     while not _stop:
@@ -510,19 +517,17 @@ def wheel_controller():
             hw_steer = _can.get("steer", STEER_CONFIG["CENTER"])
 
         if is_avoid:
-            # 회피 모드: 단계 제어
             current_steer_f = float(hw_steer)
-            if abs(hw_steer - target_steer) > STEER_CONFIG["STEP"]:
-                final_out = (STEER_CONFIG["MAX"] if hw_steer < target_steer 
-                            else STEER_CONFIG["MIN"]) if hw_steer < target_steer else hw_steer + STEER_CONFIG["STEP"]
-                final_out = min(STEER_CONFIG["MAX"], hw_steer + STEER_CONFIG["STEP"]) if hw_steer < target_steer else max(STEER_CONFIG["MIN"], hw_steer - STEER_CONFIG["STEP"])
-            else:
-                final_out = int(target_steer)
+
+        diff = target_steer - current_steer_f
+
+        if is_avoid:
+            delta = np.clip(diff, -step_limit, step_limit)
         else:
-            # 일반 모드: P-Control
-            error = target_steer - current_steer_f
-            current_steer_f += error * Kp
-            final_out = int(np.clip(current_steer_f, STEER_CONFIG["MIN"], STEER_CONFIG["MAX"]))
+            delta = diff * Kp
+            
+        current_steer_f += delta
+        final_out = int(np.clip(current_steer_f, STEER_CONFIG["MIN"], STEER_CONFIG["MAX"]))
 
         with _lock:
             _can["steer"] = final_out
@@ -582,11 +587,11 @@ def get_blink_state():
     return cycle < BLINK_INTERVAL
 
 
-def emergency_worker():
+def led_worker():
     """비상등 및 방향 깜빡이 제어"""
     while not _stop:
         with _lock:
-            emer = _can.get("emergency", False)
+            emer = _can.get("avoid_mode", False)
             left = _can.get("left_blinker", False)
             right = _can.get("right_blinker", False)
 
@@ -624,8 +629,7 @@ def emergency_control_logic():
             r_has, r_close = _zone_state["R"]
             lane_num = _can.get("lane_num", 2)
 
-        target_angle = OBSTACLE_CONFIG["CENTER"]
-        avoid_active = False
+        target_angle = STEER_CONFIG["CENTER"]
 
         # 고립 상황 판단
         if f_has and l_has and r_has or (lane_num == 1 and f_has and r_has) or (lane_num == 3 and f_has and l_has):
@@ -633,11 +637,9 @@ def emergency_control_logic():
                 _can["is_accelerating"] = False
                 _can["is_braking"] = True
                 _can["avoid_mode"] = True
-                _can["emergency"] = True
 
         # 회피 판단
         elif f_has or l_has or r_has:
-            avoid_active = True
             is_emergency = f_close or l_close or r_close
 
             if lane_num == 1:
@@ -654,14 +656,12 @@ def emergency_control_logic():
                 _can["avoid_mode"] = True
                 _can["target_steer"] = target_angle
                 _can["is_steering"] = True
-                _can["emergency"] = False
-                _can["left_blinker"] = target_angle < OBSTACLE_CONFIG["CENTER"]
-                _can["right_blinker"] = target_angle > OBSTACLE_CONFIG["CENTER"]
+                _can["left_blinker"] = target_angle < STEER_CONFIG["CENTER"]
+                _can["right_blinker"] = target_angle > STEER_CONFIG["CENTER"]
 
         else:
             with _lock:
                 _can["avoid_mode"] = False
-                _can["emergency"] = False
                 _can["left_blinker"] = False
                 _can["right_blinker"] = False
 
@@ -677,7 +677,7 @@ def auto_align_worker():
     print("[Align] Auto-align worker started.")
 
     was_avoiding = False
-    CENTER = OBSTACLE_CONFIG["CENTER"]
+    CENTER = STEER_CONFIG["CENTER"]
     TOLERANCE = 5
 
     while not _stop:
@@ -827,7 +827,6 @@ def console_input_worker():
                 with _lock:
                     _can["is_braking"] = False
                     _can["avoid_mode"] = False
-                    _can["emergency"] = False
                     _can["steer"] = STEER_CONFIG["CENTER"]
                     _can["target_steer"] = STEER_CONFIG["CENTER"]
                     _can["is_steering"] = False
@@ -865,7 +864,7 @@ def main():
         ("Speed_Controller", speed_controller),
         ("Lane_Worker", lane_worker),
         ("Avoid_Logic", emergency_control_logic),
-        ("Emergency_Worker", emergency_worker),
+        ("Emergency_Worker", led_worker),
         ("Wheel_Controller", wheel_controller),
         ("Auto_Align", auto_align_worker),
         ("Console_Input", console_input_worker),
