@@ -309,7 +309,7 @@ def speed_controller():
 
         elif is_brake:
             send_ipc_signal(VCP_IO.BREAK_LIGHT, VCP_IO.ACTION_ON) # 브레이크용 서보모터 동작(감속)
-            if current_speed > 0: 
+            if current_speed > 0 and not is_avoid: 
                 new_speed = max(current_speed - SPEED_DECREMENT, 0)
             elif current_speed < 0: 
                 new_speed = min(current_speed + SPEED_DECREMENT, 0)
