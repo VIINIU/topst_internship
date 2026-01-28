@@ -1125,10 +1125,6 @@ def main():
     # 차선 인식 스레드
     t_lane = threading.Thread(target=lane_worker, daemon=True, name="lane_worker")
     t_lane.start()
-
-    # 차선 인식 기반 조향 제어 스레드
-    t_wheel = threading.Thread(target=wheel_sender_p_control, daemon=True)
-    t_wheel.start()
     
     # 장애물 회피 제어 스레드
     t_avoid = threading.Thread(target=emergency_control_logic, daemon=True, name="Avoid_Logic")
@@ -1137,7 +1133,11 @@ def main():
     # 비상등 제어 스레드
     t_emer = threading.Thread(target=emergency_worker, daemon=True, name="emergency_controller")
     t_emer.start()
-      
+    
+    # 차선 인식 기반 조향 제어 스레드
+    t_wheel = threading.Thread(target=wheel_sender_p_control, daemon=True)
+    t_wheel.start()
+
     # 비상 휠 제어 스레드
     t_emer_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
     t_emer_wheel.start()
