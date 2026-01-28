@@ -326,55 +326,51 @@ def speed_controller():
         send_ipc_signal(VCP_IO.MOTOR_A, new_speed)
         time.sleep(ACCEL_INTERVAL)
 
+
+# =========================
+# P-Control 제어 함수 (부드럽고 빠름 - 추천)
+# =========================
 def wheel_controller():
-    """
-    avoid_mode일 때는 target_steer 값에 도달할 때까지 점진적으로 이동
-    평상시에는 기존 로직대로 동작
-    """
+    dt = 1.0 / float(WHEEL_HZ) # 주기 (0.1초)
+    Kp = 0.5                   # P-Control 계수
+    current_steer_f = float(STEER_CENTER)
+
     while not _stop:
         with _lock:
             is_avoid = _can.get("avoid_mode", False)
-            target_val = _can.get("target_steer", STEER_CENTER)
-            
-            is_steering = _can.get("is_steering", False)
-            is_steer_reverse = _can.get("is_steer_reverse", False)
-            current_steer = _can.get("steer", STEER_CENTER)
+            target_steer_avoid = float(_can.get("target_steer", STEER_CENTER)) # 회피용 목표
+            hw_steer = _can.get("steer", STEER_CENTER)
 
-        new_steer = current_steer
+        final_out_val = hw_steer
 
-        # [Case 1] 장애물 회피 모드 (목표 각도 추종)
         if is_avoid:
-            # 목표값과 현재값의 차이가 STEP보다 크면 이동
-            if abs(current_steer - target_val) > STEER_STEP:
-                if current_steer < target_val:
-                    new_steer = min(STEER_MAX, current_steer + STEER_STEP)
-                else:
-                    new_steer = max(STEER_MIN, current_steer - STEER_STEP)
-            else:
-                # 거의 도달했으면 목표값으로 고정
-                new_steer = target_val
+            current_steer_f = float(hw_steer) 
             
-            # 값 반영 및 전송
-            with _lock:
-                _can["steer"] = new_steer
-            send_ipc_signal(VCP_IO.WHEEL, new_steer)
+            if abs(hw_steer - target_steer_avoid) > STEER_STEP:
+                if hw_steer < target_steer_avoid:
+                    final_out_val = min(STEER_MAX, hw_steer + STEER_STEP)
+                else:
+                    final_out_val = max(STEER_MIN, hw_steer - STEER_STEP)
+            else:
+                final_out_val = int(target_steer_avoid)
 
-        # [Case 2] 수동/일반 조향 모드 (기존 로직 유지)
-        elif is_steering:
-            if is_steer_reverse: # Left
-                new_steer = min(STEER_MAX, current_steer + STEER_STEP)
-            else: # Right
-                new_steer = max(STEER_MIN, current_steer - STEER_STEP)
-
-            with _lock:
-                _can["steer"] = new_steer
-            send_ipc_signal(VCP_IO.WHEEL, new_steer)
-        
         else:
-            # 조향 입력 없을 때 (유지)
-            send_ipc_signal(VCP_IO.WHEEL, current_steer)
+            
+            target = target_steer_avoid 
+            error = target - current_steer_f
+            control = error * Kp
+            
+            current_steer_f += control
+            final_out_val = int(current_steer_f)
+            final_out_val = max(STEER_MIN, min(STEER_MAX, final_out_val))
 
-        time.sleep(0.05)
+        with _lock:
+            _can["steer"] = final_out_val
+
+        send_ipc_signal(VCP_IO.WHEEL, final_out_val)
+        
+        # 주기 대기
+        time.sleep(dt)
 
 # =========================================================
 # 🔽 [소연] LED 제어 코드 수정🔽 
@@ -602,37 +598,6 @@ def ai_data_worker():
                 try: sock.close()
                 except: pass
 
-# =========================
-# P-Control 제어 함수 (부드럽고 빠름 - 추천)
-# =========================
-def wheel_sender_p_control():
-    dt = 1.0 / float(WHEEL_HZ)
-    
-    Kp = 0.5 
-    
-    current_steer_f = float(STEER_CENTER)
-
-    while not _stop:
-        with _lock:
-            target = float(_can["target_steer"])
-            is_emergency = _can["avoid_mode"]
-        
-        if not is_emergency :
-            error = target - current_steer_f
-            control = error * Kp
-            
-            current_steer_f += control
-            
-            out_val = int(current_steer_f)
-            out_val = max(STEER_MIN, min(STEER_MAX, out_val))
-            
-            with _lock:
-                _can["steer"] = out_val
-
-            send_ipc_signal(VCP_IO.WHEEL, out_val)
-            send_ipc_signal(VCP_IO.MOTOR_A, 30)
-            time.sleep(dt)
-
 # =========================================================
 # 2. [추가] 바퀴 자동 정렬 워커 (Console Worker 역할 보조)
 # =========================================================
@@ -702,21 +667,20 @@ def update_steer_flags_from_lane(steer_norm: float, lane_num: int, on_th: float 
     with _lock:
         is_emergency = _can.get("avoid_mode", False)
 
-    if _can.get("avoid_mode", False):
-        
-        _can["target_steer"] = target
-        if lane_num != 0 :
-            _can["lane_num"] = lane_num
-
-        prev_on = bool(_can.get("is_steering", False))
-        mag = abs(steer_norm)
-
-        if prev_on:
-            is_on = mag >= off_th
-        else:
-            is_on = mag >= on_th
-        
+    if not is_emergency:
         with _lock:
+            _can["target_steer"] = target
+            if lane_num != 0 :
+                _can["lane_num"] = lane_num
+
+            prev_on = bool(_can.get("is_steering", False))
+            mag = abs(steer_norm)
+
+            if prev_on:
+                is_on = mag >= off_th
+            else:
+                is_on = mag >= on_th
+        
             _can["is_steering"] = is_on
             _can["is_steer_reverse"] = True if steer_norm > 0 else False
 
