@@ -1099,8 +1099,8 @@ def main():
     t_emer.start()
 
     # 휠 제어 스레드　（통합）
-    t_emer_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
-    t_emer_wheel.start()
+    t_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
+    t_wheel.start()
 
     # [NEW] 바퀴 자동 정렬 워커 추가
     t_align = threading.Thread(target=auto_align_worker, daemon=True, name="Auto_Align")
