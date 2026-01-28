@@ -263,9 +263,6 @@ def wheel_action(cur):
 
 def speed_controller():
 
-    BRAKE_ENGAGED = 100   # 브레이크 작동 시 (각도는 테스트 후 조정)
-    BRAKE_RELEASED = 10   # 평상시 (해제 상태)
-
     while not _stop:
         with _lock:
             is_accel = _can.get("is_accelerating", False)
