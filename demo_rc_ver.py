@@ -1,10 +1,11 @@
-
 import json, time, socket, threading, http.client
 import serial
-import select  # <--- 이 줄이 꼭 필요합니다!
+import select  
 from urllib.parse import urlparse
 from typing import Any, Dict
 import argparse
+import cv2
+import numpy as np
 from Library.IPC_Library import IPC_SendPacketWithIPCHeader, IPC_ReceivePacketFromIPCHeader
 from Library.IPC_Library import TCC_IPC_CMD_CA72_EDUCATION_CAN_DEMO, IPC_IPC_CMD_CA72_EDUCATION_CAN_DEMO_START
 from Library.IPC_Library import parse_hex_data, parse_string_data, parse_channels, parse_hex16
@@ -176,6 +177,12 @@ STEER_STEP = 10
 
 BLINK_INTERVAL = 0.5  # 깜빡이 간격 (0.5초)
 
+# lane detect, wheel 제어 변수
+WHEEL_HZ = 10
+CAM_INDEX = 1
+FRAME_W = 640
+FRAME_H = 480
+
 TASK_HZ = {
     "break":     10,  
     "head":      10,   
@@ -184,7 +191,7 @@ TASK_HZ = {
     "fuel":      60, 
     "wheel":     10,
 }
-_latest = {"rpm":0.0,"speed_kmh":0.0,"fuel_l":0.0,"steering":0.0}
+# _latest = {"rpm":0.0,"speed_kmh":0.0,"fuel_l":0.0,"steering":0.0}
 
 _can = {"park": False, 
         "left_blinker": False, 
@@ -595,6 +602,37 @@ def ai_data_worker():
                 try: sock.close()
                 except: pass
 
+# =========================
+# P-Control 제어 함수 (부드럽고 빠름 - 추천)
+# =========================
+def wheel_sender_p_control():
+    dt = 1.0 / float(WHEEL_HZ)
+    
+    Kp = 0.5 
+    
+    current_steer_f = float(STEER_CENTER)
+
+    while not _stop:
+        with _lock:
+            target = float(_can["target_steer"])
+            is_emergency = _can["avoid_mode"]
+        
+        if not is_emergency :
+            error = target - current_steer_f
+            control = error * Kp
+            
+            current_steer_f += control
+            
+            out_val = int(current_steer_f)
+            out_val = max(STEER_MIN, min(STEER_MAX, out_val))
+            
+            with _lock:
+                _can["steer"] = out_val
+
+            send_ipc_signal(VCP_IO.WHEEL, out_val)
+            send_ipc_signal(VCP_IO.MOTOR_A, 30)
+            time.sleep(dt)
+
 # =========================================================
 # 2. [추가] 바퀴 자동 정렬 워커 (Console Worker 역할 보조)
 # =========================================================
@@ -647,6 +685,385 @@ def auto_align_worker():
 
         was_avoiding = is_avoid
         time.sleep(0.05)
+
+# =========================================================
+# Lane detection 업데이트
+# =========================================================
+LANE_ON_TH  = 0.12
+LANE_OFF_TH = 0.08
+
+def update_steer_flags_from_lane(steer_norm: float, lane_num: int, on_th: float = LANE_ON_TH, off_th: float = LANE_OFF_TH) -> None:
+    """LaneVisualizer가 내는 steer_norm(-1~+1)을 이용해 업데이트"""
+    if steer_norm is None:
+        steer_norm = 0.0
+    steer_norm = float(np.clip(steer_norm, -1.0, 1.0))
+    target = int(np.clip(STEER_CENTER + steer_norm * (STEER_MAX - STEER_CENTER), STEER_MIN, STEER_MAX))
+
+    with _lock:
+        is_emergency = _can.get("avoid_mode", False)
+
+    if _can.get("avoid_mode", False):
+        
+        _can["target_steer"] = target
+        if lane_num != 0 :
+            _can["lane_num"] = lane_num
+
+        prev_on = bool(_can.get("is_steering", False))
+        mag = abs(steer_norm)
+
+        if prev_on:
+            is_on = mag >= off_th
+        else:
+            is_on = mag >= on_th
+        
+        with _lock:
+            _can["is_steering"] = is_on
+            _can["is_steer_reverse"] = True if steer_norm > 0 else False
+
+# =========================================================
+# 🔧 LaneVisualizer - 전체 구간 차선 인식 적용
+# =========================================================
+class LaneVisualizer:
+    def __init__(self):
+        self.CAR_CENTER_X = FRAME_W // 2
+        
+        # ✅ 수정 1: ROI를 전체 화면으로 확장 (원래: 0.35)
+        self.ROI_TOP_RATIO = 0.3  # 0% = 맨 위부터 시
+        
+        self.GAMMA = 0.6
+
+        self.Y_EVAL = FRAME_H - 10
+        
+        # ✅ 수정 2: 최소 Y값을 매우 낮춤 (원래: 360)
+        self.MIN_Y_MAX = int(FRAME_H * 0.3)  # 144 (더 높은 위치 차선도 감지)
+
+        self.lane_width_est = 350.0
+        self.W_ALPHA = 0.12
+        self.W_MIN, self.W_MAX = 160.0, 700.0
+
+        self.STEER_YS = [350, 400, 450]
+        self.STEER_W  = [0.4, 0.3, 0.3]
+
+        self.STEER_GAIN = 0.9
+        self.DEADZONE = 0.01
+        self.ALPHA = 0.35
+        self.MAX_DELTA = 0.15
+        self.prev_steer = 0.0
+
+        self.DEBUG = True
+
+        self.current_lane = 2
+        self.candidate_lane = 2
+        self.lane_confirm_cnt = 0
+        self.CONFIRM_THRESHOLD = 5
+
+    def calc_angle_term(self, poly_func, y_ref, img_width):
+        dpoly = np.polyder(poly_func)
+        slope = float(dpoly(y_ref))
+        angle_norm = slope / (img_width * 0.5)
+        return float(np.clip(angle_norm, -1.0, 1.0))
+
+    def process_frame(self, frame):
+        h, w = frame.shape[:2]
+
+        darker = self.adjust_gamma(frame, gamma=self.GAMMA)
+        blur = cv2.GaussianBlur(darker, (5, 5), 0)
+
+        yellow_mask, white_mask = self.get_color_masks(blur)
+        
+        # ✅ 수정: apply_roi_full 사용 (전체 구간)
+        roi_yellow = self.apply_roi_full(yellow_mask)
+        roi_white  = self.apply_roi_full(white_mask)
+
+        candidates = []
+        candidates += self.find_lane_candidates(roi_yellow, "Yellow")
+        candidates += self.find_lane_candidates(roi_white,  "White")
+
+        left_candidates, right_candidates = [], []
+        for c in candidates:
+            if c['x_eval'] < self.CAR_CENTER_X:
+                left_candidates.append(c)
+            else:
+                right_candidates.append(c)
+
+        def score(c):
+            dist = abs(c['x_eval'] - self.CAR_CENTER_X)
+            return (c['y_max'] * 10.0) - dist
+
+        left_lane  = max(left_candidates,  key=score) if left_candidates  else None
+        right_lane = max(right_candidates, key=score) if right_candidates else None
+
+        detected_lane = 0
+        if left_lane and right_lane:
+            l_cls = left_lane['color']
+            r_cls = right_lane['color']
+            
+            if l_cls == "Yellow" and r_cls == "White":
+                detected_lane = 1
+            elif l_cls == "White" and r_cls == "White":
+                detected_lane = 2
+            elif l_cls == "White" and r_cls == "Yellow":
+                detected_lane = 3
+        
+        if detected_lane != 0:
+            if detected_lane == self.candidate_lane:
+                self.lane_confirm_cnt += 1
+            else:
+                self.candidate_lane = detected_lane
+                self.lane_confirm_cnt = 1
+            
+            if self.lane_confirm_cnt >= self.CONFIRM_THRESHOLD:
+                self.current_lane = self.candidate_lane
+
+        result_img = frame.copy()
+        draw_ys = np.arange(int(h * self.ROI_TOP_RATIO), h)
+
+        if self.DEBUG:
+            cv2.line(result_img, (self.CAR_CENTER_X, 0), (self.CAR_CENTER_X, h),
+                    (255, 0, 255), 2)
+
+        final_left_poly = None
+        final_right_poly = None
+
+        if left_lane:
+            final_left_poly = left_lane['poly']
+            self.draw_poly(result_img, final_left_poly, draw_ys, (0,255,255), "L")
+
+        if right_lane:
+            final_right_poly = right_lane['poly']
+            self.draw_poly(result_img, final_right_poly, draw_ys, (255,255,0), "R")
+
+        center_poly = None
+        lane_status = "Unknown"
+
+        if final_left_poly is not None and final_right_poly is not None:
+            ys = np.array(self.STEER_YS, dtype=np.float32)
+            w_now = float(np.mean(final_right_poly(ys) - final_left_poly(ys)))
+            if self.W_MIN < w_now < self.W_MAX:
+                self.lane_width_est = (1 - self.W_ALPHA) * self.lane_width_est + self.W_ALPHA * w_now
+
+            center_poly = lambda y: (final_left_poly(y) + final_right_poly(y)) / 2.0
+            lane_status = "Both"
+
+        elif final_left_poly is not None:
+            center_poly = lambda y: final_left_poly(y) + (self.lane_width_est / 2.0)
+            lane_status = "Left"
+
+        elif final_right_poly is not None:
+            center_poly = lambda y: final_right_poly(y) - (self.lane_width_est / 2.0)
+            lane_status = "Right"
+
+        steer = self.prev_steer
+
+        if center_poly is not None:
+            xs = []
+            ws = []
+            angle_terms = []
+
+            for y, wgt in zip(self.STEER_YS, self.STEER_W):
+                yy = int(np.clip(y, draw_ys[0], draw_ys[-1]))
+                xx = float(center_poly(yy))
+                xx = float(np.clip(xx, 0, w-1))
+                xs.append(xx)
+                ws.append(wgt)
+
+                angle_terms.append(
+                    self.calc_angle_term(
+                        final_left_poly if final_left_poly is not None else final_right_poly,
+                        y_ref=yy,
+                        img_width=w
+                    )
+                )
+
+            x_target = float(np.average(xs, weights=ws))
+            error_px = x_target - self.CAR_CENTER_X
+            offset_term = float(np.clip(error_px / (w / 4.0), -1.0, 1.0))
+
+            angle_term = float(np.mean(angle_terms)) if angle_terms else 0.0
+
+            OFFSET_W = 0.7
+            ANGLE_W  = 0.3
+
+            raw = (OFFSET_W * offset_term + ANGLE_W * angle_term)* 1.5
+            raw = float(np.clip(raw, -1.0, 1.0))
+
+            if abs(raw) < self.DEADZONE:
+                raw = 0.0
+
+            filt = (1 - self.ALPHA) * self.prev_steer + self.ALPHA * raw
+
+            filt = float(np.clip(
+                filt,
+                self.prev_steer - self.MAX_DELTA,
+                self.prev_steer + self.MAX_DELTA
+            ))
+
+            self.prev_steer = filt
+            steer = filt
+
+            if self.DEBUG:
+                cv2.putText(result_img, f"Lane: {self.current_lane}", (20, 125),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+                        
+                cv2.putText(
+                    result_img,
+                    f"offset={offset_term:+.2f} angle={angle_term:+.2f} steer={steer:+.2f}",
+                    (20, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0,255,255),
+                    2
+                )
+
+        cv2.putText(result_img,
+                    f"Lane: {lane_status}",
+                    (20, 55),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.65,
+                    (255,255,255),
+                    2)
+        
+        return result_img, steer, self.current_lane
+
+    def find_lane_candidates(self, mask, color_label):
+        """✅ 수정: 후보 필터링 완화"""
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            # ✅ 최소 면적 낮춤 (200 → 100)
+            if area < 100:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+            aspect_ratio = float(w) / max(h, 1)
+            # ✅ aspect_ratio 제한 완화 (6.0 → 8.0)
+            if aspect_ratio > 8.0:
+                continue
+
+            try:
+                pts = cnt.reshape(-1, 2)
+                x_data = pts[:, 0].astype(np.float32)
+                y_data = pts[:, 1].astype(np.float32)
+
+                y_max = float(y_data.max())
+                if y_max < self.MIN_Y_MAX:
+                    continue
+
+                poly_coeffs = np.polyfit(y_data, x_data, 2)
+                poly_func = np.poly1d(poly_coeffs)
+
+                y_eval = min(self.Y_EVAL, y_max)
+                x_eval = float(poly_func(y_eval))
+
+                candidates.append({
+                    'poly': poly_func,
+                    'color': color_label,
+                    'x_eval': x_eval,
+                    'y_eval': y_eval,
+                    'y_max': y_max
+                })
+            except:
+                pass
+
+        return candidates
+
+    def draw_poly(self, img, poly_func, y_range, color, label):
+        try:
+            x_plot = poly_func(y_range).astype(int)
+            x_plot = np.clip(x_plot, 0, img.shape[1]-1)
+            pts = np.column_stack((x_plot, y_range))
+            cv2.polylines(img, [pts], False, color, 4)
+            cv2.putText(img, label, (int(x_plot[0]), int(y_range[0]) - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        except:
+            pass
+
+    def adjust_gamma(self, image, gamma=1.0):
+        inv = 1.0 / max(gamma, 1e-6)
+        table = np.array([((i / 255.0) ** inv) * 255 for i in range(256)], dtype=np.uint8)
+        return cv2.LUT(image, table)
+
+    def get_color_masks(self, frame):
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+
+        lower_yellow = np.array([15, 80, 80])
+        upper_yellow = np.array([40, 255, 255])
+        yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+
+        lower_white = np.array([0, 0, 210])
+        upper_white = np.array([180, 50, 255])
+        white_mask = cv2.inRange(hsv, lower_white, upper_white)
+
+        kernel = np.ones((3, 3), np.uint8)
+        yellow_mask = cv2.morphologyEx(yellow_mask, cv2.MORPH_OPEN, kernel)
+        white_mask  = cv2.morphologyEx(white_mask,  cv2.MORPH_OPEN, kernel)
+
+        return yellow_mask, white_mask
+
+    def apply_roi(self, mask):
+        """원래 ROI (아래쪽만)"""
+        height, width = mask.shape
+        roi = np.zeros_like(mask)
+        top = int(height * self.ROI_TOP_RATIO)
+        
+        margin_top = int(width * 0.3)
+        
+        poly = np.array([
+            [(0, height), (width, height), 
+             (width - margin_top, top), (margin_top, top)]
+        ], np.int32)
+        
+        cv2.fillPoly(roi, poly, 255)
+        return cv2.bitwise_and(mask, roi)
+
+    def apply_roi_full(self, mask):
+        """✅ 수정: 전체 화면을 ROI로 사용"""
+        height, width = mask.shape
+        roi = np.zeros_like(mask)
+        
+        top = int(height * self.ROI_TOP_RATIO)  # 0.0이면 0 (맨 위)
+        
+        # 전체 너비 사용 (직사각형)
+        poly = np.array([
+            [(0, height), (width, height), 
+             (width, top), (0, top)]
+        ], np.int32)
+        
+        cv2.fillPoly(roi, poly, 255)
+        return cv2.bitwise_and(mask, roi)
+
+
+def lane_worker(cam_index: int = 1, show: bool = True):
+    """카메라 차선 인식"""
+    cap = cv2.VideoCapture(cam_index)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    visualizer = LaneVisualizer()
+
+    while not _stop:
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.05)
+            continue
+
+        vis, steer_norm, lane_num = visualizer.process_frame(frame)
+
+        update_steer_flags_from_lane(steer_norm, lane_num)
+
+        if show:
+            cv2.imshow("Lane Detection", vis)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    cap.release()
+    try:
+        cv2.destroyAllWindows()
+    except:
+        pass
 
 # =========================================================
 # 3. [유지] 터미널 명령어 입력 워커 (수정 없음)
@@ -705,6 +1122,14 @@ def main():
     t_speed = threading.Thread(target=speed_controller, daemon=True, name="speed_controller")
     t_speed.start()
     
+    # 차선 인식 스레드
+    t_lane = threading.Thread(target=lane_worker, daemon=True, name="lane_worker")
+    t_lane.start()
+
+    # 차선 인식 기반 조향 제어 스레드
+    t_wheel = threading.Thread(target=wheel_sender_p_control, daemon=True)
+    t_wheel.start()
+    
     # 장애물 회피 제어 스레드
     t_avoid = threading.Thread(target=emergency_control_logic, daemon=True, name="Avoid_Logic")
     t_avoid.start()
@@ -713,9 +1138,9 @@ def main():
     t_emer = threading.Thread(target=emergency_worker, daemon=True, name="emergency_controller")
     t_emer.start()
       
-    # 휠 제어 스레드
-    t_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
-    t_wheel.start()
+    # 비상 휠 제어 스레드
+    t_emer_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
+    t_emer_wheel.start()
 
     # [NEW] 바퀴 자동 정렬 워커 추가
     t_align = threading.Thread(target=auto_align_worker, daemon=True, name="Auto_Align")
@@ -731,9 +1156,13 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
-        _stop = True
-        # t.join() 등은 daemon=True라 필수는 아니지만 안전 종료를 위해 대기 가능
-        time.sleep(1)
+        _stop = True        
+        try:
+            t_lane.join(timeout=1.0)
+            t_wheel.join(timeout=1.0)
+            time.sleep(1)
+        except NameError:
+            pass
         print("Shutdown complete.")
         if sndfile: sndfile.close() 
 
