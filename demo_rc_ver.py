@@ -1097,12 +1097,8 @@ def main():
     # 비상등 제어 스레드
     t_emer = threading.Thread(target=emergency_worker, daemon=True, name="emergency_controller")
     t_emer.start()
-    
-    # 차선 인식 기반 조향 제어 스레드
-    t_wheel = threading.Thread(target=wheel_sender_p_control, daemon=True)
-    t_wheel.start()
 
-    # 비상 휠 제어 스레드
+    # 휠 제어 스레드　（통합）
     t_emer_wheel = threading.Thread(target=wheel_controller, daemon=True, name="can")
     t_emer_wheel.start()
 
