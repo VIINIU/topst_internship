@@ -48,6 +48,7 @@ AI_CONFIG = {
 AI_CAMERA_CONFIG = {
     "WIDTH": 800,
     "HEIGHT": 480,
+    # "Y_THRESHOLD" : 100,
 }
 
 # 카메라 설정
@@ -146,6 +147,7 @@ class ObjectAnalytics:
     def update_status(self, json_data: dict):
         """3프레임마다 한 번씩 연산 (CPU 최적화)"""
         self.frame_count += 1
+        # y_threshold = AI_CAMERA_CONFIG["Y_THRESHOLD"]
         
         # 3번째 프레임이 아니면 이전 결과 반환
         if self.frame_count % 3 != 0:
@@ -169,7 +171,10 @@ class ObjectAnalytics:
                 
                 obj_w, obj_h = xmax - xmin, ymax - ymin
                 obj_area = obj_w * obj_h
-                center_x = xmin + obj_w / 2.0
+                center_x = xmin + ( obj_w / 2.0 )
+                
+                # if ymin < y_threshold:
+                #     continue
 
                 # 구역 판단
                 div_1 = self.w / 2.8

@@ -3,7 +3,7 @@ import json
 
 AI_G_IP = "192.168.0.101"
 PORT = 9999
-
+# 
 def main():
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
